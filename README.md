@@ -152,3 +152,7 @@ Flutter
 Built with Flutter ❤️ by Varun Vailala
 
 ---
+
+## 📄 License
+
+This project is licensed under the Apache License 2.0.
