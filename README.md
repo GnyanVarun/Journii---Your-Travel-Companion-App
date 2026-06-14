@@ -20,6 +20,18 @@ By leveraging AI, real-time data, and location intelligence, Journii helps trave
   <li>Create memorable experiences instead of managing logistics</li>
 </ul>
 
+## 📸 App Gallery
+
+| Home Screen | AI Trip Planner | Smart Routing |
+| :---: | :---: | :---: |
+| <img src="https://github.com/user-attachments/assets/af679ebc-aede-4ca6-9983-0d723439bec3" width="250" alt="home_screen" /> | <img src="https://github.com/user-attachments/assets/bd3aebc1-b4ad-4cde-9ef2-5f2ac7a911ef" width="250" alt="ai_chat_sheet" /> | <img src="https://github.com/user-attachments/assets/25706bf0-0baf-4b46-a0f6-ea9b62c7e841" width="250" alt="itinerary_map_view" /> |
+
+<br>
+
+| Live Events | Interactive Map | Profile & Cloud Sync |
+| :---: | :---: | :---: |
+| <img src="https://github.com/user-attachments/assets/66a9136e-9872-4e02-a451-029e5efbcd5a" width="250" alt="explore_tab" /> | <img src="https://github.com/user-attachments/assets/4aab6592-c6eb-4662-8a31-d8c4dbbdb48a" width="250" alt="event_details" /> | <img src="https://github.com/user-attachments/assets/2f2042d2-0bd8-4d4c-8b78-50af3f421322" width="250" alt="profile_page" /> |
+
 ## 🚀 Key Features
 
 ### 🧠 AI Travel Assistant
