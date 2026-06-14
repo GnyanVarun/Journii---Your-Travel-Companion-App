@@ -117,7 +117,7 @@ Designed with a focus on:
   <li>Smooth animations</li>
   <li>Adaptive layouts</li>
   <li>Dark Mode Support</li>
-  <li>aAccessibility</li>
+  <li>Accessibility</li>
   <li>performance Optimization</li>
 </ul>
 
