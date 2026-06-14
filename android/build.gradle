@@ -40,8 +40,15 @@ subprojects {
     }
 }
 
-subprojects {
-    project.evaluationDependsOn(":app")
+subprojects { project ->
+    project.afterEvaluate {
+        if (project.hasProperty('android')) {
+            project.android {
+                compileSdkVersion 35
+            }
+        }
+    }
+    project.evaluationDependsOn(':app')
 }
 
 tasks.register("clean", Delete) {
@@ -60,3 +67,4 @@ subprojects { project ->
         }
     }
 }
+
