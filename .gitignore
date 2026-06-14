@@ -43,3 +43,9 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Ignore the environment file
+assets/place_placeholders/.env
+gemini-backend/.env
+node_modules/
+android/gradle.properties

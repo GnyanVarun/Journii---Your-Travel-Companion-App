@@ -16,6 +16,10 @@ class AITripPlanner {
         title: idea.name,
         description: idea.notes,
         day: day++,
+
+        // ✅ IMPORTANT
+        isAiGenerated: true,
+        isLocked: false,
       );
     }).toList();
   }

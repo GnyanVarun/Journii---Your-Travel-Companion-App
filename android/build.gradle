@@ -1,3 +1,18 @@
+// Top-level build file
+buildscript {
+    ext.kotlin_version = '2.2.21'
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        // Android Gradle Plugin (AGP)
+        classpath 'com.android.tools.build:gradle:8.3.2'
+        // Kotlin plugin (optional, remove if unused)
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.10"
+    }
+}
+
 allprojects {
     repositories {
         google()
@@ -9,10 +24,39 @@ rootProject.buildDir = "../build"
 subprojects {
     project.buildDir = "${rootProject.buildDir}/${project.name}"
 }
+
+// ===========================================================================
+// 🟢 FIX: DYNAMIC NAMESPACE FALLBACK FOR OLDER PLUGINS (e.g., move_to_background)
+// ===========================================================================
+subprojects {
+    afterEvaluate { project ->
+        if (project.hasProperty('android')) {
+            project.android {
+                if (namespace == null) {
+                    namespace project.group
+                }
+            }
+        }
+    }
+}
+
 subprojects {
     project.evaluationDependsOn(":app")
 }
 
 tasks.register("clean", Delete) {
     delete rootProject.buildDir
+}
+
+subprojects { project ->
+    project.buildscript {
+        ext.kotlin_version = '2.2.21'
+        repositories {
+            google()
+            mavenCentral()
+        }
+        dependencies {
+            classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
+        }
+    }
 }
