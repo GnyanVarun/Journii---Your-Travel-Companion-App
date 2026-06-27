@@ -49,3 +49,7 @@ assets/place_placeholders/.env
 gemini-backend/.env
 node_modules/
 android/gradle.properties
+
+# FVM Version Cache
+.fvm/
+.fvm/flutter_sdk
