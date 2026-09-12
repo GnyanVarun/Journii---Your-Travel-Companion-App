@@ -1,13 +1,13 @@
 import 'dart:ui';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:move_to_background/move_to_background.dart'; // 🟢 NEW: Added for Background interception
 
 import '../features/trips/trip_list_page.dart';
 import '../profile/profile_page.dart';
 import '../home/home_screen.dart';
-import 'explore_tab.dart'; // 🟢 Import the new Explore Tab
-import 'package:flutter/services.dart';
+import 'explore_tab.dart';
 
 class MainPage extends ConsumerStatefulWidget {
   const MainPage({super.key});
@@ -19,47 +19,86 @@ class MainPage extends ConsumerStatefulWidget {
 class _MainPageState extends ConsumerState<MainPage> {
   int _currentIndex = 0;
 
+  // ===========================================================================
+  // ANDROID BACKGROUND CHANNEL
+  // ===========================================================================
+  // Replaces the old `move_to_background` package.
+  //
+  // The corresponding native Android implementation is required in
+  // MainActivity.kt.
+  static const MethodChannel _appChannel = MethodChannel('journii/app');
+
+  Future<void> _moveTaskToBackground() async {
+    try {
+      await _appChannel.invokeMethod('moveTaskToBack');
+    } on PlatformException catch (e) {
+      debugPrint(
+        'Failed to move Journii to background: ${e.message}',
+      );
+    } on MissingPluginException catch (e) {
+      debugPrint(
+        'Background method is not available: $e',
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
 
-    // 🟢 WRAPPED IN POPSCOPE TO INTERCEPT SYSTEM BACK GESTURES
+    // =========================================================================
+    // SYSTEM BACK GESTURE / BUTTON INTERCEPTION
+    // =========================================================================
+    //
+    // Instead of closing the application, pressing Android Back while on the
+    // MainPage sends the application to the background.
     return PopScope(
-      canPop: false, // Prevents the route from popping and killing the app
-      onPopInvoked: (bool didPop) {
+      canPop: false,
+      onPopInvokedWithResult: (bool didPop, dynamic result) {
         if (didPop) return;
-        // Pushes the app to the background safely, keeping memory intact
-        MoveToBackground.moveTaskToBack();
+
+        // Send the application to the Android background without terminating
+        // the application or destroying its current state.
+        _moveTaskToBackground();
       },
       child: Scaffold(
-        // 🟢 This allows the screen content to flow behind the floating nav bar
+        // Allows the screen content to flow behind the floating navigation bar.
         extendBody: true,
+
         body: IndexedStack(
           index: _currentIndex,
-          // 🟢 MOVING THIS HERE fixes the Hot Reload bug forever!
           children: const [
-            HomePage(),     // Index 0
-            ExploreTab(),   // Index 1
-            TripListPage(), // Index 2
-            ProfilePage(),  // Index 3
+            HomePage(),
+            ExploreTab(),
+            TripListPage(),
+            ProfilePage(),
           ],
         ),
+
         bottomNavigationBar: _buildFloatingNavBar(isDark),
       ),
     );
   }
 
   // ===========================================================================
-  // 2026 UI TREND: FLOATING GLASSMORPHIC CAPSULE
+  // FLOATING GLASSMORPHIC NAVIGATION BAR
   // ===========================================================================
   Widget _buildFloatingNavBar(bool isDark) {
     return SafeArea(
       child: Padding(
-        padding: const EdgeInsets.only(left: 24, right: 24, bottom: 24, top: 8),
+        padding: const EdgeInsets.only(
+          left: 24,
+          right: 24,
+          bottom: 24,
+          top: 8,
+        ),
         child: ClipRRect(
-          borderRadius: BorderRadius.circular(32), // Modern Squircle shape
+          borderRadius: BorderRadius.circular(32),
           child: BackdropFilter(
-            filter: ImageFilter.blur(sigmaX: 15, sigmaY: 15),
+            filter: ImageFilter.blur(
+              sigmaX: 15,
+              sigmaY: 15,
+            ),
             child: Container(
               height: 72,
               padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -76,22 +115,46 @@ class _MainPageState extends ConsumerState<MainPage> {
                 ),
                 boxShadow: [
                   BoxShadow(
-                    color: Colors.black.withOpacity(isDark ? 0.3 : 0.08),
+                    color: Colors.black.withOpacity(
+                      isDark ? 0.3 : 0.08,
+                    ),
                     blurRadius: 24,
                     offset: const Offset(0, 8),
-                  )
+                  ),
                 ],
               ),
-              child: // Update your _buildFloatingNavBar method to use these specific icons
-              Row(
+              child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
-                  // Using rounded variants for a softer, premium 2026 feel
-                  _buildFluidNavItem(0, Icons.home_rounded, Icons.home_outlined, 'Home', isDark),
-                  _buildFluidNavItem(1, Icons.explore_rounded, Icons.explore_outlined, 'Explore', isDark),
-                  _buildFluidNavItem(2, Icons.luggage_rounded, Icons.luggage_outlined, 'My Trips', isDark),
-                  _buildFluidNavItem(3, Icons.account_circle_rounded, Icons.account_circle_outlined, 'Profile', isDark),
+                  _buildFluidNavItem(
+                    0,
+                    Icons.home_rounded,
+                    Icons.home_outlined,
+                    'Home',
+                    isDark,
+                  ),
+                  _buildFluidNavItem(
+                    1,
+                    Icons.explore_rounded,
+                    Icons.explore_outlined,
+                    'Explore',
+                    isDark,
+                  ),
+                  _buildFluidNavItem(
+                    2,
+                    Icons.luggage_rounded,
+                    Icons.luggage_outlined,
+                    'My Trips',
+                    isDark,
+                  ),
+                  _buildFluidNavItem(
+                    3,
+                    Icons.account_circle_rounded,
+                    Icons.account_circle_outlined,
+                    'Profile',
+                    isDark,
+                  ),
                 ],
               ),
             ),
@@ -102,41 +165,58 @@ class _MainPageState extends ConsumerState<MainPage> {
   }
 
   // ===========================================================================
-  // 2026 UI TREND: FLUID EXPANSION TABS
+  // FLUID EXPANSION NAVIGATION ITEMS
   // ===========================================================================
-  Widget _buildFluidNavItem(int index, IconData activeIcon, IconData inactiveIcon, String label, bool isDark) {
+  Widget _buildFluidNavItem(
+    int index,
+    IconData activeIcon,
+    IconData inactiveIcon,
+    String label,
+    bool isDark,
+  ) {
     final isSelected = _currentIndex == index;
 
-    // 🟢 FIXED: Explicitly sets Aqua for Dark Mode and Navy for Light Mode
-    final activeColor = isDark ? const Color(0xFF00E5FF) : const Color(0xFF2E3192);
+    // Explicitly sets Aqua for Dark Mode and Navy for Light Mode.
+    final activeColor = isDark
+        ? const Color(0xFF00E5FF)
+        : const Color(0xFF2E3192);
 
-    final inactiveColor = isDark ? Colors.white60 : Colors.black45;
+    final inactiveColor = isDark
+        ? Colors.white60
+        : Colors.black45;
 
     return GestureDetector(
       onTap: () {
-        // 🟢 Haptic feedback for tactile response
+        // Haptic feedback for tactile response.
         HapticFeedback.lightImpact();
-        setState(() => _currentIndex = index);
+
+        setState(() {
+          _currentIndex = index;
+        });
       },
       behavior: HitTestBehavior.opaque,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 500),
-        // 🟢 Elastic physics for a "bouncy" 2026 feel
         curve: Curves.elasticOut,
         padding: EdgeInsets.symmetric(
           horizontal: isSelected ? 16.0 : 12.0,
           vertical: 12.0,
         ),
         decoration: BoxDecoration(
-          color: isSelected ? activeColor.withOpacity(0.12) : Colors.transparent,
+          color: isSelected
+              ? activeColor.withOpacity(0.12)
+              : Colors.transparent,
           borderRadius: BorderRadius.circular(24),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            // 🟢 Icon "Pulse" animation on select
+            // Icon pulse animation on selection.
             TweenAnimationBuilder<double>(
-              tween: Tween<double>(begin: 1.0, end: isSelected ? 1.15 : 1.0),
+              tween: Tween<double>(
+                begin: 1.0,
+                end: isSelected ? 1.15 : 1.0,
+              ),
               duration: const Duration(milliseconds: 300),
               curve: Curves.easeOutBack,
               builder: (context, scale, child) {
@@ -144,22 +224,26 @@ class _MainPageState extends ConsumerState<MainPage> {
                   scale: scale,
                   child: Icon(
                     isSelected ? activeIcon : inactiveIcon,
-                    color: isSelected ? activeColor : inactiveColor,
+                    color: isSelected
+                        ? activeColor
+                        : inactiveColor,
                     size: 26,
                   ),
                 );
               },
             ),
+
             AnimatedSize(
               duration: const Duration(milliseconds: 400),
-              curve: Curves.elasticOut, // Consistent spring curve
+              curve: Curves.elasticOut,
               child: SizedBox(
                 width: isSelected ? null : 0,
                 child: Padding(
-                  padding: EdgeInsets.only(left: isSelected ? 8.0 : 0),
+                  padding: EdgeInsets.only(
+                    left: isSelected ? 8.0 : 0,
+                  ),
                   child: Text(
                     label,
-                    // 🟢 FIXED: Removed `const` to allow the dynamic color
                     style: TextStyle(
                       color: activeColor,
                       fontWeight: FontWeight.w800,
@@ -176,3 +260,4 @@ class _MainPageState extends ConsumerState<MainPage> {
     );
   }
 }
+
