@@ -184,7 +184,32 @@ class _TripIntelViewState extends State<TripIntelView> {
 
   void _showRedZoneSheet(BuildContext context, List laws, bool isDark) => showModalBottomSheet(context: context, backgroundColor: Colors.transparent, builder: (_) => _DetailSheet(title: "Laws & Fines", icon: Icons.gavel_rounded, color: const Color(0xFFFF5A5F), isDark: isDark, children: [...laws.map((law) => _DetailRow(icon: "🚫", title: law['title'], desc: law['desc'], badge: "Fine: ${law['fine']}", isDark: isDark))]));
   void _showHacksSheet(BuildContext context, List hacks, bool isDark) => showModalBottomSheet(context: context, backgroundColor: Colors.transparent, builder: (_) => _DetailSheet(title: "Local Hacks", icon: Icons.lightbulb_rounded, color: const Color(0xFFFFB703), isDark: isDark, children: [...hacks.map((hack) => _DetailRow(icon: "💡", title: "Tip", desc: hack, isDark: isDark))]));
-  void _showScamsSheet(BuildContext context, List scams, bool isDark) => showModalBottomSheet(context: context, backgroundColor: Colors.transparent, builder: (_) => _DetailSheet(title: "Common Scams", icon: Icons.security_rounded, color: const Color(0xFF06D6A0), isDark: isDark, children: [...scams.map((scam) => _DetailRow(icon: "⚠️", title: scam['title'], desc: scam['desc'], isDark: isDark))]));
+
+  void _showScamsSheet(
+      BuildContext context,
+      List scams,
+      bool isDark,
+      ) =>
+      showModalBottomSheet(
+        context: context,
+        backgroundColor: Colors.transparent,
+        builder: (_) => _DetailSheet(
+          title: "Common Scams",
+          icon: Icons.security_rounded,
+          color: const Color(0xFF06D6A0),
+          isDark: isDark,
+          children: [
+            ...scams.map(
+                  (scam) => _DetailRow(
+                icon: "⚠️",
+                title: scam['title']?.toString() ?? "Common Scam",
+                desc: scam['desc']?.toString() ?? "No details available.",
+                isDark: isDark,
+              ),
+            ),
+          ],
+        ),
+      );
 
   void _showSimpleDialog(BuildContext context, String title, String content, bool isDark) => showDialog(
       context: context,
