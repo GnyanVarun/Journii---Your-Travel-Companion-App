@@ -5,7 +5,7 @@ plugins {
 }
 
 android {
-    namespace = "com.example.journii"
+    namespace = "com.varun.journii"
     compileSdk 36
     ndkVersion = flutter.ndkVersion
 

@@ -1,4 +1,4 @@
-package com.example.journii
+package com.varun.journii
 
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
