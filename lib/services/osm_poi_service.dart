@@ -27,50 +27,65 @@ class OsmPoiService {
   ];
   static int _serverIndex = 0;
 
-  /// Fetches POIs within a bounding box using a rotated server
-  static Future<List<PoiModel>> fetchPOIs(PoiBounds bounds) async  {
-    final serverUrl = _servers[_serverIndex];
-    _serverIndex = (_serverIndex + 1) % _servers.length;
-
+  /// Fetches POIs within a bounding box using rotated servers.
+  /// If one Overpass server fails, the next server is tried automatically.
+  static Future<List<PoiModel>> fetchPOIs(PoiBounds bounds) async {
     final s = bounds.south;
     final w = bounds.west;
     final n = bounds.north;
     final e = bounds.east;
 
-    // 🟢 UPDATED QUERY: Added place_of_worship, car, and motorcycle
+    // 🟢 UPDATED QUERY: Added place_of_worship, car, motorcycle, parks, and monuments
     String query = """
-    [out:json][timeout:5];
+    [out:json][timeout:10];
     (
       node["amenity"~"restaurant|cafe|fast_food|bar|pub|hospital|clinic|pharmacy|fuel|cinema|bank|atm|place_of_worship"]($s,$w,$n,$e);
       node["shop"~"supermarket|convenience|mall|department_store|car|motorcycle"]($s,$w,$n,$e);
       node["tourism"~"hotel|hostel|motel|museum|viewpoint"]($s,$w,$n,$e);
+      node["leisure"="park"]($s,$w,$n,$e);
+      node["historic"="monument"]($s,$w,$n,$e);
       node["building"~"office|commercial|apartments|residential"]["name"]($s,$w,$n,$e);
       node["office"]($s,$w,$n,$e);
     );
     out center 50; 
   """;
 
-    try {
-      final response = await http.post(
-        Uri.parse(serverUrl),
-        headers: {
-          'User-Agent': 'JourniiTravelApp/1.0',
-          'Accept': '*/*',
-        },
-        body: {'data': query},
-      );
+    // Try every available Overpass server before giving up.
+    // Start with the current rotated server, then fall back to the others.
+    for (int attempt = 0; attempt < _servers.length; attempt++) {
+      final serverUrl = _servers[_serverIndex];
+      _serverIndex = (_serverIndex + 1) % _servers.length;
 
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        final elements = data['elements'] as List;
+      try {
+        final response = await http
+            .post(
+          Uri.parse(serverUrl),
+          headers: {
+            'User-Agent': 'JourniiTravelApp/1.0',
+            'Accept': '*/*',
+          },
+          body: {'data': query},
+        )
+            .timeout(const Duration(seconds: 15));
 
-        return elements.map((e) => PoiModel.fromJson(e)).toList();
-      } else {
+        if (response.statusCode == 200) {
+          final data = jsonDecode(response.body);
+          final elements = data['elements'] as List;
+
+          return elements.map((e) => PoiModel.fromJson(e)).toList();
+        }
+
         print("⚠️ OSM Error ${response.statusCode} from $serverUrl");
+      } catch (e) {
+        print("⚠️ POI Fetch Error from $serverUrl: $e");
       }
-    } catch (e) {
-      print("⚠️ POI Fetch Error: $e");
+
+      if (attempt < _servers.length - 1) {
+        print("🔄 Retrying OSM request with next Overpass server...");
+      }
     }
+
+    print("❌ All Overpass servers failed for this POI request.");
     return [];
   }
 
@@ -175,6 +190,8 @@ class PoiModel {
     else if (tags.containsKey('amenity')) cat = tags['amenity'];
     else if (tags.containsKey('shop')) cat = tags['shop'];
     else if (tags.containsKey('tourism')) cat = tags['tourism'];
+    else if (tags.containsKey('leisure')) cat = tags['leisure'];
+    else if (tags.containsKey('historic')) cat = tags['historic'];
 
     return PoiModel(
       id: json['id'].toString(),

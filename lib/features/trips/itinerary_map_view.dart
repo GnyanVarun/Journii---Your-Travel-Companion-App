@@ -1,3 +1,4 @@
+
 import 'dart:async';
 import 'dart:typed_data';
 import 'dart:math' as math;
@@ -19,7 +20,6 @@ import 'itinerary_item_model.dart';
 import 'place_details_sheet.dart';
 import 'navigation_provider.dart';
 import '../../services/serendipity_service.dart';
-import '../../services/amadeus_service.dart';
 import 'package:journii/features/trips/map_poi_sheet.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 
@@ -839,21 +839,15 @@ class _ItineraryMapViewState extends ConsumerState<ItineraryMapView> with Ticker
     if (!silent) setState(() => _isScanningSerendipity = true);
 
     try {
-      final rawGems = await AmadeusService.fetchHiddenGems(_cachedUserLocation!);
+      final result = await SerendipityService.scanForSecrets(
+        userLocation: _cachedUserLocation!,
+        cityContext: '',
+      );
 
       if (mounted) {
         if (!silent) setState(() => _isScanningSerendipity = false);
 
-        if (rawGems.isNotEmpty) {
-          final firstGem = rawGems.first;
-          final result = SerendipityResult(
-              name: firstGem['name'] ?? 'Unknown Gem',
-              location: ll.LatLng(firstGem['lat'], firstGem['lng']),
-              reason: "A popular ${firstGem['category']?.toLowerCase() ?? 'place'} spotted nearby. Worth a detour!",
-              photoUrl: null,
-              detourMinutes: 10
-          );
-
+        if (result != null) {
           ScaffoldMessenger.of(context).clearSnackBars();
           ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(
