@@ -1,10 +1,14 @@
 import 'dart:ui';
+import 'dart:convert';
+
+import 'package:http/http.dart' as http;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 // Import your new backend service
 import '../../services/event_backend_service.dart';
 import '../widgets/trip_selector_sheet.dart';
+import '../../services/translation_service.dart';
 
 class EventDetailPage extends ConsumerStatefulWidget {
   final Map<String, dynamic> event;
@@ -19,10 +23,33 @@ class _EventDetailPageState extends ConsumerState<EventDetailPage> {
   bool _isLoadingStatus = true;
   bool _isAddedToItinerary = false;
 
+  // Keeps the existing description as an immediate fallback while the
+  // complete StungEvents event record is retrieved.
+  String _description = '';
+
+  bool _isTranslatingDescription = false;
+  bool _showOriginalDescription = false;
+
+  String? _translatedDescription;
+  String? _detectedLanguage;
+
+  int _translationRequestId = 0;
+
+  final ScrollController _descriptionScrollController = ScrollController();
+
+  @override
+  void dispose() {
+    _descriptionScrollController.dispose();
+    super.dispose();
+  }
+
   @override
   void initState() {
     super.initState();
+    _description = widget.event['description']?.toString() ?? '';
     _checkSavedStatus();
+    _loadFullEventDescription();
+    _translateEventContent(_description);
   }
 
   // 🟢 Checks Supabase when the page opens to see if the event is already in the itinerary
@@ -44,25 +71,197 @@ class _EventDetailPageState extends ConsumerState<EventDetailPage> {
     }
   }
 
-  // 🟢 DYNAMIC GRADIENT ENGINE (Matches the Explore Tab)
-  // FIXED: Now takes the dynamic baseAccent so it doesn't default to purple!
-  Map<String, dynamic> _getEventIdentity(Color baseAccent) {
-    final String name = (widget.event['name'] ?? '').toLowerCase();
+  Future<void> _translateEventContent(String sourceDescription) async {
+    final description = sourceDescription.trim();
+    final requestId = ++_translationRequestId;
 
-    List<Color> gradientColors = [baseAccent, const Color(0xFF1BFFFF)];
+    if (description.isEmpty) {
+      if (mounted && requestId == _translationRequestId) {
+        setState(() {
+          _isTranslatingDescription = false;
+          _translatedDescription = null;
+          _detectedLanguage = null;
+          _showOriginalDescription = false;
+        });
+      }
+      return;
+    }
+
+    if (mounted) {
+      setState(() {
+        _isTranslatingDescription = true;
+        _translatedDescription = null;
+        _showOriginalDescription = false;
+      });
+    }
+
+    try {
+      final language =
+      await TranslationService.detectLanguage(description);
+
+      if (!mounted || requestId != _translationRequestId) return;
+
+      setState(() {
+        _detectedLanguage = language;
+      });
+
+      if (language == null || language.toLowerCase() == 'en') {
+        if (mounted && requestId == _translationRequestId) {
+          setState(() {
+            _translatedDescription = null;
+            _isTranslatingDescription = false;
+          });
+        }
+        return;
+      }
+
+      final translated =
+      await TranslationService.translateToEnglish(description);
+
+      if (!mounted || requestId != _translationRequestId) return;
+
+      setState(() {
+        _translatedDescription = translated.trim().isNotEmpty
+            ? translated.trim()
+            : null;
+        _isTranslatingDescription = false;
+      });
+    } catch (e) {
+      debugPrint("Event translation error: $e");
+
+      if (mounted && requestId == _translationRequestId) {
+        setState(() {
+          _translatedDescription = null;
+          _isTranslatingDescription = false;
+        });
+      }
+    }
+  }
+
+  // 🟢 Retrieves the complete event record from StungEvents so the
+  // ABOUT THIS EVENT section can display the full description.
+  Future<void> _loadFullEventDescription() async {
+    final eventId = widget.event['id']?.toString().trim();
+
+    if (eventId == null || eventId.isEmpty) {
+      return;
+    }
+
+    final uri = Uri.parse(
+      'https://api.stungevents.com/events/${Uri.encodeComponent(eventId)}',
+    );
+
+    try {
+      final response = await http
+          .get(
+        uri,
+        headers: const {
+          'Accept': 'application/json',
+        },
+      )
+          .timeout(const Duration(seconds: 10));
+
+      if (response.statusCode != 200) {
+        debugPrint(
+          "StungEvents detail error ${response.statusCode}: ${response.body}",
+        );
+        return;
+      }
+
+      final decoded = json.decode(response.body);
+
+      if (decoded is! Map) {
+        return;
+      }
+
+      final rawEvent = decoded['event'];
+
+      if (rawEvent is! Map) {
+        return;
+      }
+
+      final fullDescription = rawEvent['description']?.toString().trim() ?? '';
+
+      if (fullDescription.isEmpty || !mounted) {
+        return;
+      }
+
+      setState(() {
+        _description = fullDescription;
+      });
+
+      // Re-run translation against the complete StungEvents description so
+      // the translated text always corresponds to the latest source text.
+      _translateEventContent(fullDescription);
+    } catch (e) {
+      debugPrint("StungEvents detail retrieval error: $e");
+    }
+  }
+
+  // 🟢 DYNAMIC GRADIENT ENGINE (Matches the Explore Tab)
+  // Uses the same category + name rules and the same priority order as Explore.
+  Map<String, dynamic> _getEventIdentity(Color baseAccent) {
+    final String name =
+    (widget.event['name'] ?? '')
+        .toString()
+        .toLowerCase();
+
+    final String category =
+    (widget.event['categoryTag'] ?? '')
+        .toString()
+        .toLowerCase();
+
+    List<Color> gradientColors = [
+      baseAccent,
+      const Color(0xFF1BFFFF),
+    ];
+
     IconData categoryIcon = Icons.explore_rounded;
 
-    if (name.contains('concert') || name.contains('tour') || name.contains('live') || name.contains('music')) {
-      gradientColors = [const Color(0xFF8A2387), const Color(0xFFE94057)];
-      categoryIcon = Icons.music_note_rounded;
-    } else if (name.contains('sport') || name.contains('match') || name.contains('cup') || name.contains('marathon')) {
-      gradientColors = [const Color(0xFFFF416C), const Color(0xFFFF4B2B)];
-      categoryIcon = Icons.sports_basketball_rounded;
-    } else if (name.contains('festival') || name.contains('fest') || name.contains('party')) {
-      gradientColors = [const Color(0xFFF2994A), const Color(0xFFF2C94C)];
+    if (category.contains('festival') ||
+        name.contains('festival') ||
+        name.contains('fest') ||
+        name.contains('party')) {
+      gradientColors = [
+        const Color(0xFFF2994A),
+        const Color(0xFFF2C94C),
+      ];
+
       categoryIcon = Icons.celebration_rounded;
-    } else if (name.contains('theater') || name.contains('play') || name.contains('show') || name.contains('comedy')) {
-      gradientColors = [const Color(0xFF11998E), const Color(0xFF38EF7D)];
+    } else if (category.contains('sport') ||
+        name.contains('sport') ||
+        name.contains('match') ||
+        name.contains('cup') ||
+        name.contains('marathon') ||
+        name.contains('championship')) {
+      gradientColors = [
+        const Color(0xFFFF416C),
+        const Color(0xFFFF4B2B),
+      ];
+
+      categoryIcon = Icons.sports_basketball_rounded;
+    } else if (category.contains('concert') ||
+        name.contains('concert') ||
+        name.contains('tour') ||
+        name.contains('live') ||
+        name.contains('music')) {
+      gradientColors = [
+        const Color(0xFF8A2387),
+        const Color(0xFFE94057),
+      ];
+
+      categoryIcon = Icons.music_note_rounded;
+    } else if (category.contains('theater') ||
+        name.contains('theater') ||
+        name.contains('theatre') ||
+        name.contains('play') ||
+        name.contains('show') ||
+        name.contains('comedy')) {
+      gradientColors = [
+        const Color(0xFF11998E),
+        const Color(0xFF38EF7D),
+      ];
+
       categoryIcon = Icons.theater_comedy_rounded;
     }
 
@@ -94,7 +293,7 @@ class _EventDetailPageState extends ConsumerState<EventDetailPage> {
 
     // 🟢 SMART DESCRIPTION ENGINE
     String description = "";
-    String rawDesc = widget.event['description']?.toString() ?? "";
+    String rawDesc = _description;
 
     if (rawDesc.toLowerCase().contains("sourced from predicthq") || rawDesc.trim().isEmpty) {
       final String name = widget.event['name'] ?? 'This event';
@@ -105,6 +304,17 @@ class _EventDetailPageState extends ConsumerState<EventDetailPage> {
     } else {
       description = rawDesc;
     }
+
+    final hasTranslation =
+        _translatedDescription != null &&
+            _translatedDescription!.trim().isNotEmpty &&
+            _detectedLanguage != null &&
+            _detectedLanguage!.toLowerCase() != 'en';
+
+    final displayDescription =
+    hasTranslation && !_showOriginalDescription
+        ? _translatedDescription!
+        : description;
 
     return Scaffold(
       backgroundColor: bgColor,
@@ -249,14 +459,88 @@ class _EventDetailPageState extends ConsumerState<EventDetailPage> {
                               letterSpacing: 1.5
                           )
                       ),
-                      const SizedBox(height: 16),
-                      Text(
-                        description,
-                        style: TextStyle(
-                          color: textColor.withOpacity(0.85),
-                          fontSize: 16,
-                          height: 1.7,
-                          fontWeight: FontWeight.w500,
+                      const SizedBox(height: 12),
+                      if (hasTranslation || _isTranslatingDescription)
+                        Row(
+                          children: [
+                            if (_isTranslatingDescription)
+                              SizedBox(
+                                width: 14,
+                                height: 14,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: bgGradient.first,
+                                ),
+                              ),
+                            if (_isTranslatingDescription)
+                              const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                _isTranslatingDescription
+                                    ? 'Translating to English…'
+                                    : (_showOriginalDescription
+                                    ? 'Showing original text'
+                                    : 'Translated to English'),
+                                style: TextStyle(
+                                  color: textMuted,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w600,
+                                  letterSpacing: 0.2,
+                                ),
+                              ),
+                            ),
+                            if (hasTranslation && !_isTranslatingDescription)
+                              TextButton(
+                                onPressed: () {
+                                  setState(() {
+                                    _showOriginalDescription =
+                                    !_showOriginalDescription;
+                                  });
+                                },
+                                style: TextButton.styleFrom(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 8,
+                                    vertical: 4,
+                                  ),
+                                  minimumSize: Size.zero,
+                                  tapTargetSize:
+                                  MaterialTapTargetSize.shrinkWrap,
+                                ),
+                                child: Text(
+                                  _showOriginalDescription
+                                      ? 'English'
+                                      : 'Original',
+                                  style: TextStyle(
+                                    color: bgGradient.first,
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w800,
+                                  ),
+                                ),
+                              ),
+                          ],
+                        ),
+                      if (hasTranslation || _isTranslatingDescription)
+                        const SizedBox(height: 8),
+                      ConstrainedBox(
+                        constraints: BoxConstraints(
+                          maxHeight: MediaQuery.of(context).size.height * 0.30,
+                        ),
+                        child: Scrollbar(
+                          controller: _descriptionScrollController,
+                          thumbVisibility: true,
+                          child: SingleChildScrollView(
+                            controller: _descriptionScrollController,
+                            physics: const BouncingScrollPhysics(),
+                            child: Text(
+                              displayDescription,
+                              style: TextStyle(
+                                color: textColor.withOpacity(0.85),
+                                fontSize: 16,
+                                height: 1.7,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ),
                         ),
                       ),
                     ],

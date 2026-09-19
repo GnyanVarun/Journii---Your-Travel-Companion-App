@@ -10,6 +10,7 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'event_detail_page.dart';
+import '../../services/translation_service.dart';
 
 class ExploreTab extends ConsumerStatefulWidget {
   const ExploreTab({super.key});
@@ -44,7 +45,7 @@ class _ExploreTabState extends ConsumerState<ExploreTab> {
     viewportFraction: 0.85,
   );
 
-  // All NIM-discovered events for the current destination.
+  // All discovered events for the current destination.
   List<Map<String, dynamic>> _allEvents = [];
 
   // Only successfully mapped events matching the selected filter.
@@ -71,6 +72,11 @@ class _ExploreTabState extends ConsumerState<ExploreTab> {
       'journii_explore_events_';
 
   final Map<String, LatLng> _destinationCache = {};
+  final Map<String, String?> _destinationCountryCodeCache = {};
+  final Map<String, String> _destinationTypeCache = {};
+
+  String? _currentCountryCode;
+  String _currentDestinationType = '';
 
   // Session cache only.
   //
@@ -83,6 +89,15 @@ class _ExploreTabState extends ConsumerState<ExploreTab> {
   _venueRequestsInFlight = {};
 
   SharedPreferences? _preferences;
+
+  // ---------------------------------------------------------------------------
+  // TRANSLATED EVENT DISPLAY CACHE
+  // ---------------------------------------------------------------------------
+  // These values are presentation-only. The original event name/venue remain
+  // untouched for StungEvents, Mapbox geocoding, caching, and backend use.
+  final Map<String, String> _translatedEventNames = {};
+  final Map<String, String> _translatedEventVenues = {};
+  int _displayTranslationRequestId = 0;
 
   // ===========================================================================
   // DESTINATION SUGGESTIONS
@@ -121,7 +136,7 @@ class _ExploreTabState extends ConsumerState<ExploreTab> {
     super.initState();
 
     // IMPORTANT:
-    // Explore does NOT automatically call NVIDIA when the tab opens.
+    // Explore does NOT automatically call the event API when the tab opens.
     _initializeLocalCache();
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -258,6 +273,10 @@ class _ExploreTabState extends ConsumerState<ExploreTab> {
 
     FocusScope.of(context).unfocus();
 
+    _displayTranslationRequestId++;
+    _translatedEventNames.clear();
+    _translatedEventVenues.clear();
+
     setState(() {
       _isLoading = true;
       _isGeocoding = false;
@@ -302,6 +321,18 @@ class _ExploreTabState extends ConsumerState<ExploreTab> {
       destination['longitude']
       as double;
 
+      final countryCode =
+      destination['countryCode']
+          ?.toString()
+          .trim()
+          .toUpperCase();
+
+      final destinationType =
+          destination['featureType']
+              ?.toString()
+              .trim()
+              .toLowerCase() ?? '';
+
       setState(() {
         _currentCity =
             cityName;
@@ -314,6 +345,9 @@ class _ExploreTabState extends ConsumerState<ExploreTab> {
 
         _currentLon =
             longitude;
+
+        _currentCountryCode = countryCode;
+        _currentDestinationType = destinationType;
       });
 
       _mapController.move(
@@ -328,6 +362,8 @@ class _ExploreTabState extends ConsumerState<ExploreTab> {
         cityName: cityName,
         latitude: latitude,
         longitude: longitude,
+        countryCode: countryCode,
+        destinationType: destinationType,
         forceRefresh: false,
       );
 
@@ -400,6 +436,10 @@ class _ExploreTabState extends ConsumerState<ExploreTab> {
         cached.latitude,
         'longitude':
         cached.longitude,
+        'countryCode':
+        _destinationCountryCodeCache[normalized],
+        'featureType':
+        _destinationTypeCache[normalized] ?? '',
       };
     }
 
@@ -527,6 +567,24 @@ class _ExploreTabState extends ConsumerState<ExploreTab> {
     selectedFeature[
     'properties'];
 
+    final featureType =
+        properties?['feature_type']
+            ?.toString()
+            .trim()
+            .toLowerCase() ?? '';
+
+    String? countryCode;
+    final contextData = properties?['context'];
+    if (contextData is Map) {
+      final countryData = contextData['country'];
+      if (countryData is Map) {
+        countryCode = countryData['country_code']
+            ?.toString()
+            .trim()
+            .toUpperCase();
+      }
+    }
+
     final mapboxName =
     properties?['name']
         ?.toString()
@@ -549,6 +607,10 @@ class _ExploreTabState extends ConsumerState<ExploreTab> {
     _destinationCache[
     normalized] =
         coordinate;
+    _destinationCountryCodeCache[normalized] =
+        countryCode;
+    _destinationTypeCache[normalized] =
+        featureType;
 
     return {
       'name':
@@ -557,6 +619,10 @@ class _ExploreTabState extends ConsumerState<ExploreTab> {
       lat,
       'longitude':
       lon,
+      'countryCode':
+      countryCode,
+      'featureType':
+      featureType,
     };
   }
 
@@ -607,6 +673,8 @@ class _ExploreTabState extends ConsumerState<ExploreTab> {
     required String cityName,
     required double latitude,
     required double longitude,
+    String? countryCode,
+    String destinationType = '',
     required bool forceRefresh,
   }) async {
     final cacheKey =
@@ -617,7 +685,7 @@ class _ExploreTabState extends ConsumerState<ExploreTab> {
     );
 
     // -------------------------------------------------------------------------
-    // 1. CHECK PERSISTENT NIM CACHE
+    // 1. CHECK PERSISTENT EVENT CACHE
     // -------------------------------------------------------------------------
 
     if (!forceRefresh) {
@@ -630,7 +698,7 @@ class _ExploreTabState extends ConsumerState<ExploreTab> {
           null &&
           cachedEvents.isNotEmpty) {
         debugPrint(
-          "Using cached NIM events for $cityName",
+          "Using cached event results for $cityName",
         );
 
         if (!mounted) return;
@@ -651,6 +719,8 @@ class _ExploreTabState extends ConsumerState<ExploreTab> {
           _isLoading = false;
           _isGeocoding = true;
         });
+
+        _translateEventsForDisplay(_allEvents);
 
         await _resolveAndDisplayVenues(
           requestEvents:
@@ -676,7 +746,7 @@ class _ExploreTabState extends ConsumerState<ExploreTab> {
     }
 
     // -------------------------------------------------------------------------
-    // 2. NO VALID CACHE → NIM
+    // 2. NO VALID CACHE → STUNGEVENTS
     // -------------------------------------------------------------------------
 
     setState(() {
@@ -685,10 +755,12 @@ class _ExploreTabState extends ConsumerState<ExploreTab> {
     });
 
     final generatedEvents =
-    await _fetchEventsFromNvidia(
+    await _fetchEventsFromStungEvents(
       cityName: cityName,
       latitude: latitude,
       longitude: longitude,
+      countryCode: countryCode,
+      destinationType: destinationType,
     );
 
     if (!mounted) return;
@@ -709,7 +781,7 @@ class _ExploreTabState extends ConsumerState<ExploreTab> {
     }
 
     // -------------------------------------------------------------------------
-    // 3. SAVE RAW NIM EVENTS
+    // 3. SAVE RAW EVENT RESULTS
     // -------------------------------------------------------------------------
     //
     // Coordinates from Mapbox are deliberately not persisted here.
@@ -736,6 +808,8 @@ class _ExploreTabState extends ConsumerState<ExploreTab> {
       _isLoading = false;
       _isGeocoding = true;
     });
+
+    _translateEventsForDisplay(_allEvents);
 
     // -------------------------------------------------------------------------
     // 4. MAP VENUES
@@ -777,6 +851,10 @@ class _ExploreTabState extends ConsumerState<ExploreTab> {
     final requestId =
     ++_searchRequestId;
 
+    _displayTranslationRequestId++;
+    _translatedEventNames.clear();
+    _translatedEventVenues.clear();
+
     setState(() {
       _isLoading = true;
       _isGeocoding = false;
@@ -808,6 +886,10 @@ class _ExploreTabState extends ConsumerState<ExploreTab> {
       _currentLat,
       longitude:
       _currentLon,
+      countryCode:
+      _currentCountryCode,
+      destinationType:
+      _currentDestinationType,
       forceRefresh:
       true,
     );
@@ -824,541 +906,436 @@ class _ExploreTabState extends ConsumerState<ExploreTab> {
   }
 
   // ===========================================================================
-  // NVIDIA NIM
+  // STUNGEVENTS EVENT DISCOVERY
   // ===========================================================================
 
   Future<List<Map<String, dynamic>>>
-  _fetchEventsFromNvidia({
+  _fetchEventsFromStungEvents({
     required String cityName,
     required double latitude,
     required double longitude,
+    String? countryCode,
+    String destinationType = '',
   }) async {
-    final apiKey =
-    dotenv.env[
-    'NVIDIA_API_KEY']
-        ?.trim();
+    const host = 'api.stungevents.com';
+    const path = '/events';
 
-    if (apiKey == null ||
-        apiKey.isEmpty) {
-      _showMessage(
-        "NVIDIA API key is missing from your .env file.",
+    final normalizedCountryCode =
+    countryCode?.trim().toUpperCase();
+
+    final isCountry = destinationType == 'country';
+
+    const cityLikeTypes = {
+      'place',
+      'locality',
+      'neighborhood',
+      'city',
+      'district',
+      'region',
+    };
+
+    final baseParams = <String, String>{
+      'limit': '100',
+      'offset': '0',
+    };
+
+    // StungEvents documents city and country as first-class filters.
+    // For countries, the resolved Mapbox display name (for example Japan)
+    // is the best value for the country filter. For city-like destinations,
+    // use the destination name directly.
+    if (isCountry) {
+      if (cityName.trim().isNotEmpty) {
+        baseParams['country'] = cityName.trim();
+      }
+    } else if (cityLikeTypes.contains(destinationType) &&
+        cityName.trim().isNotEmpty) {
+      baseParams['city'] = cityName.trim();
+    } else if (cityName.trim().isNotEmpty) {
+      // Keep the existing region/district retrieval mechanism functional by
+      // attempting the destination name as a city/prefix search first.
+      baseParams['city'] = cityName.trim();
+    }
+
+    Future<List<Map<String, dynamic>>> requestEvents(
+        Map<String, String> params) async {
+      final uri = Uri.https(
+        host,
+        path,
+        params,
       );
-      return [];
-    }
 
-    const model =
-        'nvidia/nemotron-3.5-lightning-30b-a3b';
-
-    final endpoint =
-    Uri.parse(
-      'https://integrate.api.nvidia.com/v1/chat/completions',
-    );
-
-    final now =
-    DateTime.now().toUtc();
-
-    final startDate =
-        '${now.year.toString().padLeft(4, '0')}-'
-        '${now.month.toString().padLeft(2, '0')}-'
-        '${now.day.toString().padLeft(2, '0')}';
-
-    final systemPrompt = '''
-You are the event discovery engine for Journii.
-
-Discover upcoming real-world events that may make a traveler
-want to visit a destination.
-
-Supported categories:
-- Concerts 🎸
-- Sports ⚽
-- Festivals 🎪
-- Theater 🎭
-
-IMPORTANT:
-- Do not deliberately create fictional events.
-- Do not invent event names.
-- Do not invent venues.
-- Do not invent addresses.
-- Do not invent dates.
-- Prefer established, recognizable or strongly verifiable events.
-- Each event must be specifically associated with the requested destination.
-- The venue must be the actual place where the event takes place.
-- Provide the most precise venue name possible.
-- Provide a complete address whenever known.
-- Explicitly provide the city and country.
-- Never return latitude or longitude.
-- The application resolves venue coordinates through a map service.
-- Avoid duplicates.
-- Avoid generic tourist attractions.
-- Do not represent a permanent venue as an event.
-
-Return between 8 and 15 events.
-
-Return ONLY valid JSON:
-
-{
-  "events": [
-    {
-      "id": "stable-id",
-      "name": "Exact event name",
-      "description": "Short factual description",
-      "date": "YYYY-MM-DD",
-      "venue": "Exact venue name",
-      "address": "Full venue address",
-      "city": "City",
-      "country": "Country",
-      "category": "Concerts 🎸",
-      "ticketUrl": "Official event or source URL if confidently known"
-    }
-  ]
-}
-
-If a reliable ticket URL is not known,
-return an empty string.
-
-Do not return markdown.
-Do not return commentary outside JSON.
-''';
-
-    final userPrompt = '''
-Destination:
-$cityName
-
-Destination coordinates:
-Latitude: $latitude
-Longitude: $longitude
-
-Today's UTC date:
-$startDate
-
-Find upcoming events that could be compelling reasons
-for a traveler to visit $cityName.
-
-Prioritize:
-- major concerts
-- sporting events
-- festivals
-- theatre
-- comedy
-- performing arts
-- notable scheduled events
-
-Every event should have a specific real-world venue.
-Use the exact venue name and full address whenever possible.
-''';
-
-    try {
-      final response =
-      await http.post(
-        endpoint,
-        headers: {
-          'Authorization':
-          'Bearer $apiKey',
-          'Content-Type':
-          'application/json',
-          'Accept':
-          'application/json',
-        },
-        body: jsonEncode({
-          'model': model,
-          'messages': [
-            {
-              'role': 'system',
-              'content':
-              systemPrompt,
-            },
-            {
-              'role': 'user',
-              'content':
-              userPrompt,
-            },
-          ],
-          'temperature': 0.1,
-          'top_p': 0.85,
-          'max_tokens': 7000,
-          'stream': false,
-          'chat_template_kwargs': {
-            'enable_thinking': false,
+      try {
+        final response = await http.get(
+          uri,
+          headers: const {
+            'Accept': 'application/json',
           },
-        }),
-      );
-
-      if (response.statusCode !=
-          200) {
-        debugPrint(
-          "NVIDIA error "
-              "${response.statusCode}: "
-              "${response.body}",
         );
-        return [];
-      }
 
-      final decoded =
-      json.decode(
-        response.body,
-      );
-
-      final choices =
-      decoded['choices'];
-
-      if (choices is! List ||
-          choices.isEmpty) {
-        return [];
-      }
-
-      final message =
-      choices.first['message'];
-
-      if (message is! Map) {
-        return [];
-      }
-
-      final content =
-      message['content']
-          ?.toString()
-          .trim();
-
-      if (content == null ||
-          content.isEmpty) {
-        return [];
-      }
-
-      final parsed =
-      _decodeJsonResponse(
-        content,
-      );
-
-      if (parsed == null) {
-        debugPrint(
-          "NVIDIA returned invalid JSON:\n$content",
-        );
-        return [];
-      }
-
-      final rawEvents =
-      parsed['events'];
-
-      if (rawEvents is! List) {
-        return [];
-      }
-
-      final normalized =
-      <Map<String, dynamic>>[];
-
-      for (
-      int index = 0;
-      index < rawEvents.length;
-      index++
-      ) {
-        final raw =
-        rawEvents[index];
-
-        if (raw is! Map) {
-          continue;
+        if (response.statusCode != 200) {
+          debugPrint(
+            "StungEvents error ${response.statusCode}: ${response.body}",
+          );
+          return [];
         }
 
-        final event =
-        _normalizeNvidiaEvent(
-          raw,
+        final decoded = json.decode(response.body);
+
+        if (decoded is! Map) {
+          debugPrint(
+            "StungEvents returned an unexpected response shape.",
+          );
+          return [];
+        }
+
+        final rawEvents = decoded['events'];
+
+        if (rawEvents is! List) {
+          debugPrint(
+            "StungEvents response did not contain an events array.",
+          );
+          return [];
+        }
+
+        return rawEvents
+            .whereType<Map>()
+            .map((event) => Map<String, dynamic>.from(event))
+            .toList();
+      } catch (e) {
+        debugPrint(
+          "StungEvents event retrieval error: $e",
+        );
+        return [];
+      }
+    }
+
+    try {
+      var rawEvents = await requestEvents(baseParams);
+
+      // If a non-country destination did not return anything, try the
+      // country filter with the resolved ISO-2 code as a conservative
+      // fallback. This does not alter the UI or cache mechanism; it only
+      // gives the retrieval layer another documented endpoint filter to use.
+      if (rawEvents.isEmpty &&
+          !isCountry &&
+          normalizedCountryCode != null &&
+          normalizedCountryCode.length == 2) {
+        final fallbackParams = <String, String>{
+          'country': normalizedCountryCode,
+          'limit': '100',
+          'offset': '0',
+        };
+
+        debugPrint(
+          "StungEvents returned no events for $cityName. Trying country fallback $normalizedCountryCode.",
+        );
+
+        rawEvents = await requestEvents(fallbackParams);
+      }
+
+      if (rawEvents.isEmpty) {
+        debugPrint(
+          "StungEvents returned no events for $cityName.",
+        );
+        return [];
+      }
+
+      final normalized = <Map<String, dynamic>>[];
+      final seenKeys = <String>{};
+
+      for (int index = 0; index < rawEvents.length; index++) {
+        final event = _normalizeStungEvent(
+          rawEvents[index],
           cityName,
           index,
         );
 
-        if (event != null) {
-          normalized.add(event);
+        if (event == null) {
+          continue;
+        }
+
+        final key =
+            '${event['name']?.toString().toLowerCase().trim()}|'
+            '${event['venue']?.toString().toLowerCase().trim()}|'
+            '${event['date']?.toString().trim()}';
+
+        if (seenKeys.contains(key)) {
+          continue;
+        }
+
+        seenKeys.add(key);
+        normalized.add(event);
+
+        // Preserve the same practical 8–15 event display range used by the
+        // previous retrieval mechanism while allowing the source API to
+        // return a larger pool for filtering/deduplication.
+        if (normalized.length >= 15) {
+          break;
         }
       }
+
+      debugPrint(
+        "StungEvents returned ${normalized.length} usable events for $cityName.",
+      );
 
       return normalized;
     } catch (e) {
       debugPrint(
-        "NVIDIA event retrieval error: $e",
+        "StungEvents event retrieval error: $e",
       );
       return [];
     }
   }
 
-  Map<String, dynamic>?
-  _decodeJsonResponse(
-      String content,
+  Map<String, dynamic>? _normalizeStungEvent(
+      Map raw,
+      String cityName,
+      int index,
       ) {
-    try {
-      final decoded =
-      json.decode(content);
+    String readString(dynamic value) {
+      if (value == null) return '';
+      if (value is String) return value.trim();
+      return value.toString().trim();
+    }
 
-      if (decoded is Map) {
-        return Map<String, dynamic>.from(
-          decoded,
-        );
-      }
-    } catch (_) {}
-
-    final cleaned =
-    content
-        .replaceAll(
-      '```json',
-      '',
-    )
-        .replaceAll(
-      '```',
-      '',
-    )
-        .trim();
-
-    try {
-      final decoded =
-      json.decode(cleaned);
-
-      if (decoded is Map) {
-        return Map<String, dynamic>.from(
-          decoded,
-        );
-      }
-    } catch (_) {}
-
-    final firstBrace =
-    cleaned.indexOf('{');
-
-    final lastBrace =
-    cleaned.lastIndexOf('}');
-
-    if (firstBrace >= 0 &&
-        lastBrace > firstBrace) {
-      final possibleJson =
-      cleaned.substring(
-        firstBrace,
-        lastBrace + 1,
-      );
-
-      try {
-        final decoded =
-        json.decode(
-          possibleJson,
-        );
-
-        if (decoded is Map) {
-          return Map<String, dynamic>.from(
-            decoded,
-          );
+    String readNestedString(
+        dynamic value,
+        List<String> keys,
+        ) {
+      if (value is Map) {
+        for (final key in keys) {
+          final candidate = readString(value[key]);
+          if (candidate.isNotEmpty) {
+            return candidate;
+          }
         }
-      } catch (_) {}
+      }
+      return '';
+    }
+
+    final name = readString(
+      raw['title'] ?? raw['name'],
+    );
+
+    if (name.isEmpty) {
+      return null;
+    }
+
+    final slug = readString(
+      raw['slug'] ?? raw['id'],
+    );
+
+    final startUtc = readString(
+      raw['start_utc'] ??
+          raw['start'] ??
+          raw['startDate'] ??
+          raw['date'],
+    );
+
+    final normalizedDate = _normalizeDate(startUtc);
+
+    final rawVenue = raw['venue'];
+
+    final venueName = readString(
+      raw['venue_name'] ??
+          (rawVenue is Map ? rawVenue['name'] : rawVenue),
+    );
+
+    if (venueName.isEmpty) {
+      return null;
+    }
+
+    final venueAddress = readString(
+      raw['venue_address'] ??
+          raw['address'] ??
+          raw['venueAddress'] ??
+          (rawVenue is Map
+              ? rawVenue['address'] ?? rawVenue['formatted_address']
+              : null),
+    );
+
+    final nestedVenueAddress = readNestedString(
+      rawVenue,
+      const [
+        'address',
+        'address_line',
+        'formatted_address',
+      ],
+    );
+
+    final address = venueAddress.isNotEmpty
+        ? venueAddress
+        : nestedVenueAddress;
+
+    final eventCity = readString(
+      raw['city'] ??
+          (rawVenue is Map ? rawVenue['city'] : null),
+    );
+
+    final country = readString(
+      raw['country'] ??
+          (rawVenue is Map ? rawVenue['country'] : null),
+    );
+
+    final categorySource = readString(
+      raw['category'] ??
+          raw['type'] ??
+          raw['genre'],
+    );
+
+    final category = _normalizeStungCategory(
+      name: name,
+      category: categorySource,
+    );
+
+    final description = readString(
+      raw['description'] ??
+          raw['summary'] ??
+          raw['info'] ??
+          raw['details'],
+    );
+
+    final finalDescription = description.isNotEmpty
+        ? description
+        : 'Upcoming $category event in ${eventCity.isNotEmpty ? eventCity : cityName}.';
+
+    final ticketUrl = readString(
+      raw['ticket_url'] ??
+          raw['ticketUrl'] ??
+          raw['url'] ??
+          raw['event_url'],
+    );
+
+    final imageUrl = _extractStungImageUrl(
+      raw,
+    );
+
+    final eventId = slug.isNotEmpty
+        ? slug
+        : _stableEventId(
+      '${name.toLowerCase()}|'
+          '${venueName.toLowerCase()}|'
+          '${eventCity.toLowerCase()}|'
+          '${normalizedDate ?? index}',
+    );
+
+    return {
+      'id': eventId,
+      'name': name,
+      'description': finalDescription,
+      'date': normalizedDate ?? 'TBA',
+      'imageUrl': imageUrl ??
+          'https://images.unsplash.com/photo-1459749411175-04bf5292ceea?auto=format&fit=crop&w=500&q=60',
+      'venue': venueName,
+      'address': address,
+      'city': eventCity.isNotEmpty ? eventCity : cityName,
+      'country': country,
+      'state': '',
+      'latitude': 0.0,
+      'longitude': 0.0,
+      'ticketUrl': ticketUrl.isNotEmpty
+          ? ticketUrl
+          : slug.isNotEmpty
+          ? 'https://api.stungevents.com/click/${Uri.encodeComponent(slug)}'
+          : 'https://www.google.com/search?q='
+          '${Uri.encodeComponent('$name ${eventCity.isNotEmpty ? eventCity : cityName} tickets')}',
+      'categoryTag': category,
+    };
+  }
+
+  String? _extractStungImageUrl(
+      Map raw,
+      ) {
+    String? read(dynamic value) {
+      final text = value?.toString().trim();
+      return text != null && text.isNotEmpty ? text : null;
+    }
+
+    final direct = read(
+      raw['image_url'] ??
+          raw['imageUrl'] ??
+          raw['image'],
+    );
+
+    if (direct != null) {
+      return direct;
+    }
+
+    final images = raw['images'];
+    if (images is List) {
+      for (final image in images) {
+        if (image is Map) {
+          final candidate = read(
+            image['url'] ?? image['image_url'],
+          );
+          if (candidate != null) {
+            return candidate;
+          }
+        } else {
+          final candidate = read(image);
+          if (candidate != null) {
+            return candidate;
+          }
+        }
+      }
     }
 
     return null;
   }
 
-  Map<String, dynamic>?
-  _normalizeNvidiaEvent(
-      Map raw,
-      String cityName,
-      int index,
-      ) {
-    final name =
-        raw['name']
-            ?.toString()
-            .trim() ??
-            '';
+  String _normalizeStungCategory({
+    required String name,
+    required String category,
+  }) {
+    final combined =
+    '$name $category'.toLowerCase().trim();
 
-    final venue =
-        raw['venue']
-            ?.toString()
-            .trim() ??
-            '';
-
-    final address =
-        raw['address']
-            ?.toString()
-            .trim() ??
-            '';
-
-    if (name.isEmpty ||
-        venue.isEmpty) {
-      return null;
+    if (combined.contains('festival') ||
+        combined.contains('carnival') ||
+        combined.contains('celebration')) {
+      return 'Festivals 🎪';
     }
 
-    final category =
-    _normalizeCategory(
-      raw['category']
-          ?.toString() ??
-          '',
-    );
-
-    final date =
-    _normalizeDate(
-      raw['date']
-          ?.toString()
-          .trim() ??
-          '',
-    );
-
-    final description =
-    raw['description']
-        ?.toString()
-        .trim()
-        .isNotEmpty ==
-        true
-        ? raw['description']
-        .toString()
-        .trim()
-        : 'Upcoming $category event in $cityName.';
-
-    final eventCity =
-    raw['city']
-        ?.toString()
-        .trim()
-        .isNotEmpty ==
-        true
-        ? raw['city']
-        .toString()
-        .trim()
-        : cityName;
-
-    final country =
-        raw['country']
-            ?.toString()
-            .trim() ??
-            '';
-
-    final ticketUrl =
-        raw['ticketUrl']
-            ?.toString()
-            .trim() ??
-            '';
-
-    final fallbackUrl =
-        'https://www.google.com/search?q='
-        '${Uri.encodeComponent(
-      '$name $eventCity tickets',
-    )}';
-
-    final stableSource =
-        '${name.toLowerCase()}|'
-        '${venue.toLowerCase()}|'
-        '${eventCity.toLowerCase()}|'
-        '${date ?? index}';
-
-    return {
-      'id':
-      raw['id']?.toString().trim().isNotEmpty ==
-          true
-          ? raw['id'].toString().trim()
-          : _stableEventId(
-        stableSource,
-      ),
-      'name':
-      name,
-      'description':
-      description,
-      'date':
-      date ?? 'TBA',
-      'imageUrl':
-      'https://images.unsplash.com/photo-1459749411175-04bf5292ceea?auto=format&fit=crop&w=500&q=60',
-      'venue':
-      venue,
-      'address':
-      address,
-      'city':
-      eventCity,
-      'country':
-      country,
-      'latitude':
-      0.0,
-      'longitude':
-      0.0,
-      'ticketUrl':
-      ticketUrl.isNotEmpty
-          ? ticketUrl
-          : fallbackUrl,
-      'categoryTag':
-      category,
-    };
-  }
-
-  String _normalizeCategory(
-      String value,
-      ) {
-    final normalized =
-    value.toLowerCase().trim();
-
-    if (normalized.contains(
-      'concert',
-    ) ||
-        normalized.contains(
-          'music',
-        ) ||
-        normalized.contains(
-          'gig',
-        )) {
-      return "Concerts 🎸";
+    if (combined.contains('sport') ||
+        combined.contains('football') ||
+        combined.contains('soccer') ||
+        combined.contains('basketball') ||
+        combined.contains('tennis') ||
+        combined.contains('baseball') ||
+        combined.contains('cricket') ||
+        combined.contains('racing') ||
+        combined.contains('marathon') ||
+        combined.contains('championship') ||
+        combined.contains('wrestling') ||
+        combined.contains('motorsport') ||
+        combined.contains('esport')) {
+      return 'Sports ⚽';
     }
 
-    if (normalized.contains(
-      'sport',
-    ) ||
-        normalized.contains(
-          'football',
-        ) ||
-        normalized.contains(
-          'soccer',
-        ) ||
-        normalized.contains(
-          'basketball',
-        ) ||
-        normalized.contains(
-          'tennis',
-        ) ||
-        normalized.contains(
-          'cricket',
-        ) ||
-        normalized.contains(
-          'racing',
-        ) ||
-        normalized.contains(
-          'marathon',
-        ) ||
-        normalized.contains(
-          'championship',
-        )) {
-      return "Sports ⚽";
+    if (combined.contains('music') ||
+        combined.contains('concert') ||
+        combined.contains('gig') ||
+        combined.contains('band') ||
+        combined.contains('live music')) {
+      return 'Concerts 🎸';
     }
 
-    if (normalized.contains(
-      'festival',
-    ) ||
-        normalized.contains(
-          'carnival',
-        ) ||
-        normalized.contains(
-          'celebration',
-        )) {
-      return "Festivals 🎪";
+    if (combined.contains('theater') ||
+        combined.contains('theatre') ||
+        combined.contains('comedy') ||
+        combined.contains('performing') ||
+        combined.contains('opera') ||
+        combined.contains('musical') ||
+        combined.contains('broadway') ||
+        combined.contains('play') ||
+        combined.contains('arts & theatre') ||
+        combined.contains('arts and theatre') ||
+        combined.contains('film') ||
+        combined.contains('cinema')) {
+      return 'Theater 🎭';
     }
 
-    if (normalized.contains(
-      'theater',
-    ) ||
-        normalized.contains(
-          'theatre',
-        ) ||
-        normalized.contains(
-          'comedy',
-        ) ||
-        normalized.contains(
-          'performing',
-        ) ||
-        normalized.contains(
-          'opera',
-        ) ||
-        normalized.contains(
-          'musical',
-        ) ||
-        normalized.contains(
-          'play',
-        )) {
-      return "Theater 🎭";
-    }
-
-    return "All";
+    return 'All';
   }
 
   String? _normalizeDate(
@@ -2124,7 +2101,7 @@ Use the exact venue name and full address whenever possible.
             event,
           );
 
-          // Never persist session geocoding results.
+          // Never persist session venue geocoding results.
           copy['latitude'] =
           0.0;
           copy['longitude'] =
@@ -3212,6 +3189,180 @@ Use the exact venue name and full address whenever possible.
   }
 
   // ===========================================================================
+  // TRANSLATED EVENT DISPLAY
+  // ===========================================================================
+
+  String _eventTranslationKey(
+      Map<String, dynamic> event,
+      ) {
+    final id =
+        event['id']?.toString().trim() ?? '';
+
+    if (id.isNotEmpty) {
+      return id;
+    }
+
+    return [
+      event['name']?.toString() ?? '',
+      event['venue']?.toString() ?? '',
+      event['date']?.toString() ?? '',
+    ].join('|');
+  }
+
+  String _displayEventName(
+      Map<String, dynamic> event,
+      ) {
+    final original =
+        event['name']?.toString().trim() ?? '';
+
+    if (original.isEmpty) {
+      return 'Event';
+    }
+
+    final translated =
+    _translatedEventNames[
+    _eventTranslationKey(event)];
+
+    return translated != null &&
+        translated.trim().isNotEmpty
+        ? translated
+        : original;
+  }
+
+  String _displayEventVenue(
+      Map<String, dynamic> event,
+      ) {
+    final original =
+        event['venue']?.toString().trim() ?? '';
+
+    if (original.isEmpty) {
+      return 'Venue';
+    }
+
+    final translated =
+    _translatedEventVenues[
+    _eventTranslationKey(event)];
+
+    return translated != null &&
+        translated.trim().isNotEmpty
+        ? translated
+        : original;
+  }
+
+  Future<void> _translateEventsForDisplay(
+      List<Map<String, dynamic>> events,
+      ) async {
+    if (events.isEmpty) {
+      return;
+    }
+
+    final requestId =
+    ++_displayTranslationRequestId;
+
+    // Translate a few events at a time so the UI remains responsive and
+    // we do not create a large number of simultaneous ML Kit requests.
+    const batchSize = 3;
+
+    for (
+    int start = 0;
+    start < events.length;
+    start += batchSize
+    ) {
+      if (!mounted ||
+          requestId !=
+              _displayTranslationRequestId) {
+        return;
+      }
+
+      final end =
+      (start + batchSize < events.length)
+          ? start + batchSize
+          : events.length;
+
+      final batch =
+      events.sublist(start, end);
+
+      final results =
+      await Future.wait(
+        batch.map(
+              (event) async {
+            final key =
+            _eventTranslationKey(event);
+
+            final originalName =
+                event['name']?.toString().trim() ??
+                    '';
+
+            final originalVenue =
+                event['venue']?.toString().trim() ??
+                    '';
+
+            final nameFuture =
+            originalName.isEmpty
+                ? Future.value('')
+                : TranslationService
+                .translateToEnglish(
+              originalName,
+            );
+
+            final venueFuture =
+            originalVenue.isEmpty
+                ? Future.value('')
+                : TranslationService
+                .translateToEnglish(
+              originalVenue,
+            );
+
+            final translated =
+            await Future.wait<String>([
+              nameFuture,
+              venueFuture,
+            ]);
+
+            return (
+            key: key,
+            name: translated[0],
+            venue: translated[1],
+            );
+          },
+        ),
+      );
+
+      if (!mounted ||
+          requestId !=
+              _displayTranslationRequestId) {
+        return;
+      }
+
+      var changed = false;
+
+      for (final result in results) {
+        final translatedName =
+        result.name.trim();
+
+        final translatedVenue =
+        result.venue.trim();
+
+        if (translatedName.isNotEmpty) {
+          _translatedEventNames[
+          result.key] = translatedName;
+          changed = true;
+        }
+
+        if (translatedVenue.isNotEmpty) {
+          _translatedEventVenues[
+          result.key] = translatedVenue;
+          changed = true;
+        }
+      }
+
+      if (changed && mounted) {
+        setState(() {});
+      }
+    }
+  }
+
+  // ===========================================================================
   // CUSTOM MARKER
   // ===========================================================================
 
@@ -3328,9 +3479,9 @@ Use the exact venue name and full address whenever possible.
                 ),
                 child:
                 Text(
-                  event['name']
-                      ?.toString() ??
-                      'Event',
+                  _displayEventName(
+                    event,
+                  ),
                   maxLines:
                   1,
                   overflow:
@@ -3852,9 +4003,9 @@ Use the exact venue name and full address whenever possible.
                     8,
                   ),
                   Text(
-                    event['name']
-                        ?.toString() ??
-                        'Event',
+                    _displayEventName(
+                      event,
+                    ),
                     maxLines:
                     2,
                     overflow:
@@ -3899,9 +4050,9 @@ Use the exact venue name and full address whenever possible.
                       Expanded(
                         child:
                         Text(
-                          event['venue']
-                              ?.toString() ??
-                              'Venue',
+                          _displayEventVenue(
+                            event,
+                          ),
                           style:
                           TextStyle(
                             color:
