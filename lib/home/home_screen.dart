@@ -1680,19 +1680,27 @@ class CityDetailSheet extends StatefulWidget {
 class _CityDetailSheetState extends State<CityDetailSheet> {
   String _summary   = "Loading travel insights...";
   bool   _isLoading = true;
+  final ScrollController _detailsScrollController = ScrollController();
 
   @override
   void initState() { super.initState(); _fetch(); }
+
+  @override
+  void dispose() {
+    _detailsScrollController.dispose();
+    super.dispose();
+  }
 
   Future<void> _fetch() async {
     try {
       final res = await http.get(Uri.parse(
           "https://en.wikipedia.org/api/rest_v1/page/summary/${widget.dest.hub.city}"));
       if (res.statusCode == 200) {
-        final full      = json.decode(res.body)['extract'] ?? "No summary available.";
-        final sentences = full.split('. ');
+        final full = (json.decode(res.body)['extract'] ?? "No summary available.").toString();
         setState(() {
-          _summary  = sentences.take(3).join('. ') + (sentences.length > 3 ? '...' : '');
+          // Keep the complete Wikipedia extract. The existing scroll view
+          // below allows the user to read the full Live Insights context.
+          _summary = full;
           _isLoading = false;
         });
       } else {
@@ -1756,108 +1764,115 @@ class _CityDetailSheetState extends State<CityDetailSheet> {
           ),
         ),
         Expanded(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(24.0),
-            physics: const BouncingScrollPhysics(),
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    Text(widget.dest.hub.city,
-                        style: TextStyle(color: theme.textPrimary, fontSize: 36,
-                            fontWeight: FontWeight.bold, height: 1.1)),
-                    Text(widget.dest.hub.country,
-                        style: TextStyle(color: theme.textSecond, fontSize: 18)),
-                  ])),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                    decoration: BoxDecoration(
-                      color: theme.surface,
-                      borderRadius: BorderRadius.circular(20),
-                      border: Border.all(color: theme.cardBorder),
-                    ),
-                    child: Column(children: [
-                      Icon(Icons.thermostat, color: theme.accent, size: 24),
-                      const SizedBox(height: 4),
-                      Text("${widget.dest.temperature}°C",
-                          style: TextStyle(color: theme.textPrimary,
-                              fontWeight: FontWeight.bold, fontSize: 16)),
-                      Text(widget.dest.condition,
-                          style: TextStyle(color: theme.textMuted, fontSize: 10)),
-                    ]),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 16),
-              Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: theme.goldenSoft,
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: theme.golden.withOpacity(0.3)),
-                ),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+          child: Scrollbar(
+            controller: _detailsScrollController,
+            thumbVisibility: true,
+            thickness: 3,
+            radius: const Radius.circular(8),
+            child: SingleChildScrollView(
+              controller: _detailsScrollController,
+              padding: const EdgeInsets.all(24.0),
+              physics: const BouncingScrollPhysics(),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Row(children: [
-                      Icon(Icons.wb_sunny_outlined, color: theme.golden, size: 18),
-                      const SizedBox(width: 8),
-                      Text("Sunrise: ${widget.dest.sunrise}",
-                          style: TextStyle(color: theme.golden,
-                              fontWeight: FontWeight.bold)),
-                    ]),
-                    Container(width: 1, height: 20,
-                        color: theme.golden.withOpacity(0.3)),
-                    Row(children: [
-                      Icon(Icons.wb_twilight, color: theme.golden, size: 18),
-                      const SizedBox(width: 8),
-                      Text("Sunset: ${widget.dest.sunset}",
-                          style: TextStyle(color: theme.golden,
-                              fontWeight: FontWeight.bold)),
-                    ]),
+                    Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Text(widget.dest.hub.city,
+                          style: TextStyle(color: theme.textPrimary, fontSize: 36,
+                              fontWeight: FontWeight.bold, height: 1.1)),
+                      Text(widget.dest.hub.country,
+                          style: TextStyle(color: theme.textSecond, fontSize: 18)),
+                    ])),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: theme.surface,
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(color: theme.cardBorder),
+                      ),
+                      child: Column(children: [
+                        Icon(Icons.thermostat, color: theme.accent, size: 24),
+                        const SizedBox(height: 4),
+                        Text("${widget.dest.temperature}°C",
+                            style: TextStyle(color: theme.textPrimary,
+                                fontWeight: FontWeight.bold, fontSize: 16)),
+                        Text(widget.dest.condition,
+                            style: TextStyle(color: theme.textMuted, fontSize: 10)),
+                      ]),
+                    ),
                   ],
                 ),
-              ),
-              const SizedBox(height: 32),
-              Text("LIVE INSIGHTS",
-                  style: TextStyle(color: theme.textMuted, fontSize: 12,
-                      fontWeight: FontWeight.bold, letterSpacing: 1.5)),
-              const SizedBox(height: 12),
-              if (_isLoading)
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 20.0),
-                  child: Center(child: CircularProgressIndicator(
-                      color: theme.textMuted, strokeWidth: 2)),
-                )
-              else
-                Text(_summary,
-                    style: TextStyle(color: theme.textPrimary,
-                        fontSize: 16, height: 1.6)),
-              const SizedBox(height: 40),
-              SizedBox(
-                width: double.infinity, height: 56,
-                child: ElevatedButton(
-                  onPressed: () {
-                    Navigator.pop(context);
-                    Navigator.push(context, MaterialPageRoute(
-                      builder: (_) => LiveJourneyPlanner(
-                          destination: widget.dest.hub.city),
-                    ));
-                  },
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: theme.accent, foregroundColor: theme.accentForeground,
-                    shape: const StadiumBorder(),
-                    elevation: 0,
+                const SizedBox(height: 16),
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: theme.goldenSoft,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: theme.golden.withOpacity(0.3)),
                   ),
-                  child: Text("Start Journey in ${widget.dest.hub.city}",
-                      style: TextStyle(fontSize: 16,
-                          fontWeight: FontWeight.bold, color: theme.accentForeground)),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                    children: [
+                      Row(children: [
+                        Icon(Icons.wb_sunny_outlined, color: theme.golden, size: 18),
+                        const SizedBox(width: 8),
+                        Text("Sunrise: ${widget.dest.sunrise}",
+                            style: TextStyle(color: theme.golden,
+                                fontWeight: FontWeight.bold)),
+                      ]),
+                      Container(width: 1, height: 20,
+                          color: theme.golden.withOpacity(0.3)),
+                      Row(children: [
+                        Icon(Icons.wb_twilight, color: theme.golden, size: 18),
+                        const SizedBox(width: 8),
+                        Text("Sunset: ${widget.dest.sunset}",
+                            style: TextStyle(color: theme.golden,
+                                fontWeight: FontWeight.bold)),
+                      ]),
+                    ],
+                  ),
                 ),
-              ),
-              const SizedBox(height: 20),
-            ]),
+                const SizedBox(height: 32),
+                Text("LIVE INSIGHTS",
+                    style: TextStyle(color: theme.textMuted, fontSize: 12,
+                        fontWeight: FontWeight.bold, letterSpacing: 1.5)),
+                const SizedBox(height: 12),
+                if (_isLoading)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 20.0),
+                    child: Center(child: CircularProgressIndicator(
+                        color: theme.textMuted, strokeWidth: 2)),
+                  )
+                else
+                  Text(_summary,
+                      style: TextStyle(color: theme.textPrimary,
+                          fontSize: 16, height: 1.6)),
+                const SizedBox(height: 40),
+                SizedBox(
+                  width: double.infinity, height: 56,
+                  child: ElevatedButton(
+                    onPressed: () {
+                      Navigator.pop(context);
+                      Navigator.push(context, MaterialPageRoute(
+                        builder: (_) => LiveJourneyPlanner(
+                            destination: widget.dest.hub.city),
+                      ));
+                    },
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: theme.accent, foregroundColor: theme.accentForeground,
+                      shape: const StadiumBorder(),
+                      elevation: 0,
+                    ),
+                    child: Text("Start Journey in ${widget.dest.hub.city}",
+                        style: TextStyle(fontSize: 16,
+                            fontWeight: FontWeight.bold, color: theme.accentForeground)),
+                  ),
+                ),
+                const SizedBox(height: 20),
+              ]),
+            ),
           ),
         ),
       ]),
