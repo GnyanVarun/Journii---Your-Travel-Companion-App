@@ -54,3 +54,4 @@ android/local.properties
 # FVM Version Cache
 .fvm/
 .fvm/flutter_sdk
+/nvidia-backend/.env

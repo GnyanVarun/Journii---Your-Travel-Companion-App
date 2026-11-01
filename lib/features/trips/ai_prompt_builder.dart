@@ -61,8 +61,9 @@ const systemInstruction = `
        - Don't just say "Trevi Fountain." Say "Trevi Fountain at 6 AM to catch the sunrise reflection without the crowds."
 
     2. **MAP-FRIENDLY NAMING (OSM STRICT)**:
-       - You must use the EXACT name found on OpenStreetMap.
-       - If a place is obscure, provide the "Nearest Landmark" in the description to help the map find it.
+        - Use the common, short English name indexed on OpenStreetMap without royal ceremonial suffixes (e.g., use "Wat Arun" instead of "Wat Arun Ratchawararam Ratchawaramahawihan", "Erawan Shrine" instead of "Phra Phrom Erawan", "Viking Cave" instead of "Tham Phaya Nak", "Bamboo Island" instead of "Ko Phai").
+        - Never output generic activity labels like "Chiang Mai Cooking Class"; always name a real, specific venue (e.g., "Thai Farm Cooking School").
+        - In "geoContext", ALWAYS provide the City and Province/State (e.g., "Bangkok", "Chiang Mai", "Ao Nang, Krabi")—never leave "geoContext" empty.
 
     3. **STRICT JSON FORMAT**:
        - Do not be chatty. Return ONLY the JSON object.

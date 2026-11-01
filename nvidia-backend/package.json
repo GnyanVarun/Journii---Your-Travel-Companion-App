@@ -1,0 +1,21 @@
+{
+  "name": "nvidia-backend",
+  "version": "1.0.0",
+  "description": "Journii AI backend using NVIDIA Nemotron",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@netlify/aws-lambda-compat": "^2.0.3",
+    "cors": "^2.8.6",
+    "dotenv": "^18.0.4",
+    "express": "^5.2.1",
+    "openai": "^7.23.0",
+    "serverless-http": "^4.0.0"
+  }
+}

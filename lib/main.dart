@@ -12,6 +12,7 @@ import 'package:timezone/data/latest_all.dart' as tzData;
 import 'package:timezone/timezone.dart' as tz;
 import 'package:flutter_timezone/flutter_timezone.dart';
 
+import 'home/main_page.dart';
 import 'services/supabase_service.dart';
 import 'app.dart';
 import 'features/trips/ai_itinerary_model.dart';
@@ -141,6 +142,26 @@ void main() async {
     final event = data.event;
     if (event == AuthChangeEvent.passwordRecovery) {
       navigatorKey.currentState?.push(MaterialPageRoute(builder: (_) => const UpdatePasswordScreen()));
+    }
+
+    // 2. 🟢 NEW: Sign-up Confirmation Link Clicked (or regular login)
+    else if (event == AuthChangeEvent.signedIn) {
+      final context = navigatorKey.currentContext;
+
+      // Show the welcome message
+      if (context != null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text("Welcome to Journii! 🚀"),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+
+      // Redirect to the home screen
+      navigatorKey.currentState?.pushReplacement(
+          MaterialPageRoute(builder: (_) => const MainPage())
+      );
     }
 
     // 🟢 ADDED: Global Sign Out Routing

@@ -1,6 +1,5 @@
 import 'package:hive/hive.dart';
 
-// ✅ CRITICAL: This line allows the generator to build the adapter
 part 'ai_itinerary_model.g.dart';
 
 class AIItineraryResponse {
@@ -13,18 +12,46 @@ class AIItineraryResponse {
   });
 
   factory AIItineraryResponse.fromJson(Map<String, dynamic> json) {
+    final parsedPlaces = <AIPlace>[];
+
+    if (json['places'] is List) {
+      for (final item in json['places'] as List<dynamic>) {
+        if (item is Map<String, dynamic>) {
+          parsedPlaces.add(AIPlace.fromJson(item));
+        } else if (item is Map) {
+          parsedPlaces.add(AIPlace.fromJson(Map<String, dynamic>.from(item)));
+        }
+      }
+    } else if (json['days'] is List) {
+      for (final dayObj in json['days'] as List<dynamic>) {
+        if (dayObj is! Map) continue;
+        final dayNum = dayObj['day'] is int
+            ? dayObj['day'] as int
+            : int.tryParse(dayObj['day']?.toString() ?? '') ?? 1;
+        final dayCity =
+        (dayObj['city'] ?? dayObj['geoContext'] ?? dayObj['location'])
+            ?.toString();
+        final dayPlaces = dayObj['places'];
+        if (dayPlaces is List) {
+          for (final p in dayPlaces) {
+            if (p is! Map) continue;
+            final map = Map<String, dynamic>.from(p);
+            map['day'] ??= dayNum;
+            map['geoContext'] ??= dayCity;
+            parsedPlaces.add(AIPlace.fromJson(map));
+          }
+        }
+      }
+    }
+
     return AIItineraryResponse(
-      summary: json['summary'] ?? "Here is your plan!",
-      places: (json['places'] as List<dynamic>?)
-          ?.map((item) => AIPlace.fromJson(item))
-          .toList() ??
-          [],
+      summary: json['summary']?.toString() ?? "Here is your plan!",
+      places: parsedPlaces,
     );
   }
 }
 
-// ✅ ADD HIVE ANNOTATIONS HERE
-@HiveType(typeId: 22) // Unique ID for AIPlace
+@HiveType(typeId: 22)
 class AIPlace {
   @HiveField(0)
   final String name;
@@ -41,34 +68,53 @@ class AIPlace {
   @HiveField(4)
   final String visitTip;
 
+  @HiveField(5)
+  final String? geoContext;
+
   AIPlace({
     required this.name,
     required this.description,
     required this.day,
     required this.bestTime,
     required this.visitTip,
+    this.geoContext,
   });
 
-  // 1. Existing JSON Factory (Kept unchanged)
+  static String? _extractGeoContext(Map<String, dynamic> map) {
+    final raw = map['geoContext'] ??
+        map['geo_context'] ??
+        map['city'] ??
+        map['locality'] ??
+        map['location'] ??
+        map['region'];
+    final trimmed = raw?.toString().trim();
+    return (trimmed != null && trimmed.isNotEmpty) ? trimmed : null;
+  }
+
   factory AIPlace.fromJson(Map<String, dynamic> json) {
     return AIPlace(
       name: json['name'] ?? json['placeName'] ?? "Unknown Place",
       description: json['description'] ?? "",
-      day: json['day'] is int ? json['day'] : int.tryParse(json['day'].toString()) ?? 1,
+      day: json['day'] is int
+          ? json['day']
+          : int.tryParse(json['day'].toString()) ?? 1,
       bestTime: json['bestTime'] ?? "Morning",
-      visitTip: json['visitTip'] ?? "Best visited during the ${json['bestTime']?.toString().toLowerCase() ?? 'day'}.",
+      visitTip: json['visitTip'] ??
+          "Best visited during the ${json['bestTime']?.toString().toLowerCase() ?? 'day'}.",
+      geoContext: _extractGeoContext(json),
     );
   }
 
-  // 🚀 2. NEW: The "From Map" Factory (Required for Supabase Sync)
-  // This is what the TripRepository is looking for!
   factory AIPlace.fromMap(Map<String, dynamic> map) {
     return AIPlace(
       name: map['name'] ?? "Unknown Place",
       description: map['description'] ?? "",
-      day: map['day'] is int ? map['day'] : int.tryParse(map['day'].toString()) ?? 1,
+      day: map['day'] is int
+          ? map['day']
+          : int.tryParse(map['day'].toString()) ?? 1,
       bestTime: map['bestTime'] ?? "Morning",
       visitTip: map['visitTip'] ?? "",
+      geoContext: _extractGeoContext(map),
     );
   }
 }

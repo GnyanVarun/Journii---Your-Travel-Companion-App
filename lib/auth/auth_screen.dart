@@ -33,30 +33,38 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
           _emailController.text.trim(),
           _passwordController.text.trim(),
         );
+
+        // 🟢 ONLY push to MainPage on successful LOGIN
+        if (mounted) {
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(builder: (_) => const MainPage()),
+          );
+        }
       } else {
         await auth.signUp(
           _emailController.text.trim(),
           _passwordController.text.trim(),
           _usernameController.text.trim(),
         );
+
         if (mounted) {
+          // 🟢 Tell the user to check their email instead of routing them
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
-              content: Text("Welcome to Journii! 🚀"),
+              content: Text("Welcome to Journii! 🚀 Please check your email to verify your account."),
+              duration: Duration(seconds: 4),
               behavior: SnackBarBehavior.floating,
             ),
           );
+
+          // Switch the form back to login mode so they can log in after verifying
+          setState(() {
+            _isLogin = true;
+            _passwordController.clear();
+          });
         }
       }
-
-      // 🟢 ADDED: Push to MainPage when authentication is successful
-      if (mounted) {
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(builder: (_) => const MainPage()),
-        );
-      }
-
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(

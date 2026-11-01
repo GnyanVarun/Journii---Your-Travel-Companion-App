@@ -1,0 +1,32 @@
+[build]
+command = "echo Building Functions"
+publish = "public"
+
+[functions]
+directory = "netlify/functions"
+node_bundler = "esbuild"
+external_node_modules = ["express"]
+
+[[redirects]]
+from = "/"
+to = "/.netlify/functions/api/"
+status = 200
+force = true
+
+[[redirects]]
+from = "/generate"
+to = "/.netlify/functions/api/generate"
+status = 200
+force = true
+
+[[redirects]]
+from = "/verify-places"
+to = "/.netlify/functions/api/verify-places"
+status = 200
+force = true
+
+[[redirects]]
+from = "/api/*"
+to = "/.netlify/functions/api/:splat"
+status = 200
+force = true

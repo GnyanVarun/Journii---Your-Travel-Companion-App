@@ -22,13 +22,14 @@ class AIPlaceAdapter extends TypeAdapter<AIPlace> {
       day: fields[2] as int,
       bestTime: fields[3] as String,
       visitTip: fields[4] as String,
+      geoContext: fields[5] as String?,
     );
   }
 
   @override
   void write(BinaryWriter writer, AIPlace obj) {
     writer
-      ..writeByte(5)
+      ..writeByte(6)
       ..writeByte(0)
       ..write(obj.name)
       ..writeByte(1)
@@ -38,7 +39,9 @@ class AIPlaceAdapter extends TypeAdapter<AIPlace> {
       ..writeByte(3)
       ..write(obj.bestTime)
       ..writeByte(4)
-      ..write(obj.visitTip);
+      ..write(obj.visitTip)
+      ..writeByte(5)
+      ..write(obj.geoContext);
   }
 
   @override

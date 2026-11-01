@@ -1,221 +1,170 @@
 import 'dart:async'; // Import for Timeout
 import 'dart:convert';
-import 'dart:io'; // Import for SocketException
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:http/http.dart' as http;
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../features/trips/ai_itinerary_model.dart';
-import '../config/api_config.dart';
 
 class AITravelService {
-  // Increased timeout because AI generation takes time (10-30s)
-  static const Duration _requestTimeout = Duration(seconds: 60);
+      // Increased timeout because AI generation takes time (10-30s)
+      //static const Duration _requestTimeout = Duration(minutes: 5);
 
-  // --- OLD METHOD (Can be removed if you only use chat, but keeping for safety) ---
-  Future<AIItineraryResponse> generateItinerary(String prompt) async {
-    try {
-      // FIX: Added [0] index to prevent evaluating the whole List as a string
-      print('🚀 Sending request to: ${ApiConfig.baseUrls[0]}/generate');
+      // Converts the Supabase Edge Function response into the Map expected
+      // by AIItineraryResponse.fromJson().
+      Map<String, dynamic> _decodeFunctionResponse(dynamic responseData) {
+            if (responseData is Map<String, dynamic>) {
+                  return responseData;
+            }
 
-      final response = await http.post(
-        Uri.parse('${ApiConfig.baseUrls[0]}/generate'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'prompt': prompt}),
-      ).timeout(_requestTimeout);
+            if (responseData is Map) {
+                  return Map<String, dynamic>.from(responseData);
+            }
 
-      if (response.statusCode == 200) {
-        final decoded = jsonDecode(response.body);
-        return AIItineraryResponse.fromJson(decoded);
-      } else {
-        print('❌ Server Error: ${response.statusCode} - ${response.body}');
-        throw Exception('Server error: ${response.statusCode}');
+            if (responseData is String) {
+                  final decoded = jsonDecode(responseData);
+                  if (decoded is Map) {
+                        return Map<String, dynamic>.from(decoded);
+                  }
+            }
+
+            throw const FormatException(
+                  'Supabase Edge Function returned an invalid JSON response.',
+            );
       }
-    } on SocketException {
-      throw Exception('Could not connect to server. Check your IP address!');
-    } on TimeoutException {
-      throw Exception('AI took too long to respond. Please try again.');
-    } catch (e) {
-      throw Exception('Unexpected error: $e');
-    }
-  }
 
-  // --- 🆕 NEW METHOD: Supports Chat History with Supabase Fallback ---
-  Future<AIItineraryResponse> generateItineraryWithHistory(
-      List<Map<String, String>> history) async {
+      // Shared NVIDIA -> Gemini Edge Function routing for itinerary generation.
+      Future<AIItineraryResponse> _generateItineraryUsingSupabase(
+          List<Map<String, String>> history,
+          ) async {
+            Exception? lastError;
 
-    Exception? lastError;
+            const functionNames = <String>[
+                  'nvidia-engine/generate',
+                  'gemini-engine/generate',
+            ];
 
-    // ---------------------------------------------------------
-    // ATTEMPT 1: Loop through Primary Backends (Railway)
-    // ---------------------------------------------------------
-    for (final baseUrl in ApiConfig.baseUrls) {
-      final url = Uri.parse('$baseUrl/generate');
-      print("🌐 Trying backend: $url");
+            for (final functionName in functionNames) {
+                  final isNvidia = functionName == 'nvidia-engine/generate';
 
-      try {
-        final response = await http.post(
-          url,
-          headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({'history': history}),
-        ).timeout(_requestTimeout);
+                  if (isNvidia) {
+                        print('🚀 Sending itinerary request to NVIDIA Supabase Edge Function...');
+                  } else {
+                        print('⚡ NVIDIA unavailable. Routing itinerary request to Gemini Edge Function...');
+                  }
 
-        if (response.statusCode == 200) {
-          print("✅ Success from: $baseUrl");
-          print("📥 RAW SERVER RESPONSE: ${response.body}");
+                  try {
+                        final response = await Supabase.instance.client.functions.invoke(
+                              functionName,
+                              body: {'history': history},
+                        );
 
-          final data = jsonDecode(response.body);
-          return AIItineraryResponse.fromJson(data);
-        } else {
-          print("❌ Server Error from $baseUrl: ${response.statusCode}");
-          lastError = Exception('Server error: ${response.statusCode}');
-        }
+                        if (response.data == null) {
+                              throw Exception(
+                                    '$functionName invoked successfully but returned null data.',
+                              );
+                        }
 
-      } catch (e) {
-        print("❌ Backend failed: $baseUrl");
-        print("❌ Error: $e");
-        lastError = Exception('Failed backend: $baseUrl');
+                        final Map<String, dynamic> data =
+                        _decodeFunctionResponse(response.data);
+
+                        // Treat an explicit unsuccessful response as a failed provider call
+                        // so the next configured Edge Function can be attempted.
+                        if (data['success'] == false) {
+                              throw Exception(
+                                    data['error']?.toString() ??
+                                        '$functionName returned an unsuccessful response.',
+                              );
+                        }
+
+                        print('✅ Success from Supabase Edge Function: $functionName');
+                        print('📥 RAW SERVER RESPONSE: ${response.data}');
+
+                        return AIItineraryResponse.fromJson(data);
+                  } on FunctionException catch (e) {
+                        print(
+                              '🔥 Supabase Edge Function failed [$functionName] '
+                                  '[${e.status}]: ${e.reasonPhrase}',
+                        );
+                        print('🔥 Error Details: ${e.details}');
+                        lastError = Exception(
+                              '$functionName failed: ${e.reasonPhrase}',
+                        );
+                  } on TimeoutException catch (e) {
+                        print('⏱️ Supabase Edge Function timed out [$functionName]: $e');
+                        lastError = Exception('$functionName timed out: $e');
+                  } catch (e) {
+                        print('❌ Supabase Edge Function failed [$functionName]: $e');
+                        lastError = Exception('$functionName failed: $e');
+                  }
+            }
+
+            // If both NVIDIA and Gemini Edge Functions fail, throw the final error.
+            throw lastError ?? Exception('All itinerary backend systems failed.');
       }
-    }
 
-    // ---------------------------------------------------------
-    // ATTEMPT 2: Fallback Engine (Supabase Edge Function)
-    // ---------------------------------------------------------
-    print("⚡ Railway backends exhausted or expired. Rerouting to Supabase Edge Function...");
+      // --- OLD METHOD (Kept for compatibility with existing callers) ---
+      // The NVIDIA backend expects conversation history, so the single prompt
+      // is wrapped in the same history format used by generateItineraryWithHistory().
+      Future<AIItineraryResponse> generateItinerary(String prompt) async {
+            final history = <Map<String, String>>[
+                  {'role': 'user', 'text': prompt},
+            ];
 
-    try {
-      final response = await Supabase.instance.client.functions.invoke(
-        'gemini-engine/generate',
-        body: {'history': history},
-      );
-
-      if (response.data != null) {
-        print("✅ Success from Supabase Edge Function fallback!");
-
-        // Supabase response.data arrives pre-parsed as a Map<String, dynamic>
-        final Map<String, dynamic> data = response.data;
-        return AIItineraryResponse.fromJson(data);
-      } else {
-        lastError = Exception("Supabase invoked successfully but returned null data.");
+            return _generateItineraryUsingSupabase(history);
       }
-    } on FunctionException catch (e) {
-      print("🔥 Supabase Edge Function failed [${e.status}]: ${e.reasonPhrase}");
-      print("🔥 Error Details: ${e.details}");
-      // FIX: Correctly captured the specific Supabase error phrase here
-      lastError = Exception("Supabase Function Error: ${e.reasonPhrase}");
-    } catch (e) {
-      print("🔥 Critical Error during Supabase Fallback: $e");
-      // FIX: Changed e.reasonPhrase to a safe string representation of the exception
-      lastError = Exception("Supabase Fallback Error: $e");
-    }
 
-    // If both completely collapse, throw the final gathered exception
-    throw lastError ?? Exception("All backend systems failed.");
-  }
-
-  // 🧠 SMART INTEL FETCH (V4: Multi-Tier Failover + Cache Healing + Secure Backend)
-  static Future<Map<String, dynamic>> fetchTripIntel(String destination) async {
-    final cleanCity = destination.trim().toLowerCase();
-    final supabase = Supabase.instance.client;
-    Map<String, dynamic>? intelData;
-    bool needToUpdateCache = false;
-
-    // ---------------------------------------------------------
-    // STAGE 1: 🕵️‍♂️ CHECK CACHE (Fast & Free)
-    // ---------------------------------------------------------
-    try {
-      final cachedData = await supabase
-          .from('city_intel')
-          .select('data')
-          .eq('city_name', cleanCity)
-          .maybeSingle();
-
-      if (cachedData != null) {
-        final data = cachedData['data'] as Map<String, dynamic>;
-
-        // 🛠️ SELF-HEALING CHECK (V3): We check for BOTH 'logistics' AND 'magic_moment'.
-        final hasLogistics = data.containsKey('logistics') && (data['logistics'] as List).isNotEmpty;
-        final hasMagic = data.containsKey('magic_moment');
-
-        if (hasLogistics && hasMagic) {
-          print("⚡ CACHE HIT: Loaded $cleanCity (V3 - All Features Ready).");
-          return data;
-        } else {
-          print("♻️ OUTDATED DATA: Refreshing $cleanCity to add Magic Moment...");
-          needToUpdateCache = true;
-        }
-      } else {
-        print("🔍 CACHE MISS: No data found for $cleanCity. Running fallback pipelines...");
-        needToUpdateCache = true;
+      // --- NEW METHOD: Supports Chat History with NVIDIA -> Gemini Supabase Fallback ---
+      Future<AIItineraryResponse> generateItineraryWithHistory(
+          List<Map<String, String>> history,
+          ) async {
+            return _generateItineraryUsingSupabase(history);
       }
-    } catch (dbError) {
-      print("⚠️ Cache Check Failed: $dbError");
-      needToUpdateCache = true;
-    }
 
-    // ---------------------------------------------------------
-    // STAGE 2: Primary Backends Tier (Railway Container)
-    // ---------------------------------------------------------
-    for (final baseUrl in ApiConfig.baseUrls) {
-      final url = Uri.parse('$baseUrl/intel');
-      print("🌐 Trying primary backend intel route: $url");
+      // 🧠 SMART INTEL FETCH (V4: Multi-Tier Failover + Cache Healing + Secure Backend)
+      static Future<Map<String, dynamic>> fetchTripIntel(String destination) async {
+            final cleanCity = destination.trim().toLowerCase();
+            final supabase = Supabase.instance.client;
+            Map<String, dynamic>? intelData;
+            bool needToUpdateCache = false;
 
-      try {
-        final response = await http.post(
-          url,
-          headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({'destination': cleanCity}),
-        ).timeout(_requestTimeout);
+            // ---------------------------------------------------------
+            // STAGE 1: 🕵️‍♂️ CHECK CACHE (Fast & Free)
+            // ---------------------------------------------------------
+            try {
+                  final cachedData = await supabase
+                      .from('city_intel')
+                      .select('data')
+                      .eq('city_name', cleanCity)
+                      .maybeSingle();
 
-        if (response.statusCode == 200) {
-          print("✅ Success: Intel fetched via Railway from $baseUrl");
-          intelData = jsonDecode(response.body) as Map<String, dynamic>;
-          break; // Data successfully retrieved, break out of loop
-        } else {
-          print("❌ Server Error from Intel Backend $baseUrl: ${response.statusCode}");
-        }
-      } catch (e) {
-        print("❌ Primary Intel Backend failed: $baseUrl, Error: $e");
-      }
-    }
+                  if (cachedData != null) {
+                        final data = cachedData['data'] as Map<String, dynamic>;
 
-    // ---------------------------------------------------------
-    // STAGE 3: Secondary Backend Fallback Tier (Supabase Edge Function)
-    // ---------------------------------------------------------
-    if (intelData == null) {
-      print("⚡ Railway options exhausted. Routing intel request to Supabase Edge Function...");
-      try {
-        final response = await supabase.functions.invoke(
-          'gemini-engine/intel',
-          body: {'destination': cleanCity},
-        );
+                        // 🛠️ SELF-HEALING CHECK (V3): We check for BOTH 'logistics' AND 'magic_moment'.
+                        final hasLogistics = data.containsKey('logistics') && (data['logistics'] as List).isNotEmpty;
+                        final hasMagic = data.containsKey('magic_moment');
 
-        if (response.data != null) {
-          print("✅ Success: Intel fetched via Supabase Edge Function Fallback!");
-          intelData = response.data as Map<String, dynamic>;
-        }
-      } on FunctionException catch (e) {
-        print("🔥 Supabase Intel Function failed [${e.status}]: ${e.reasonPhrase}");
-        print("🔥 Error Details: ${e.details}");
-      } catch (e) {
-        print("🔥 Critical Error during Supabase Intel Fallback: $e");
-      }
-    }
+                        if (hasLogistics && hasMagic) {
+                              print("⚡ CACHE HIT: Loaded $cleanCity (V3 - All Features Ready).");
+                              return data;
+                        } else {
+                              print("♻️ OUTDATED DATA: Refreshing $cleanCity to add Magic Moment...");
+                              needToUpdateCache = true;
+                        }
+                  } else {
+                        print("🔍 CACHE MISS: No data found for $cleanCity. Running fallback pipelines...");
+                        needToUpdateCache = true;
+                  }
+            } catch (dbError) {
+                  print("⚠️ Cache Check Failed: $dbError");
+                  needToUpdateCache = true;
+            }
 
-    // ---------------------------------------------------------
-    // STAGE 4: Client Safety Net Tier (Original Direct Gemini Call)
-    // ---------------------------------------------------------
-    if (intelData == null) {
-      print("🤖 ASKING GEMINI DIRECTLY (Safety Net Fallback) for $cleanCity...");
-      try {
-        final apiKey = dotenv.env['GEMINI_API_KEY'];
-        if (apiKey == null || apiKey.isEmpty) throw Exception("GEMINI_API_KEY missing");
-
-        // Using 2.0-flash for speed and JSON reliability
-        final url = Uri.parse(
-            'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$apiKey');
-
-        // 🚀 PROMPT UPDATED: Requests 'magic_moment' object specifically
-        final prompt = """
+            // ---------------------------------------------------------
+            // INTEL PROMPT: Shared by NVIDIA (primary) and Gemini (fallback)
+            // ---------------------------------------------------------
+            // 🚀 PROMPT UPDATED: Requests 'magic_moment' object specifically
+            final prompt = """
         ACT AS: A local travel expert and photographer.
         TASK: Provide exclusive survival & experience intel for: $destination.
         
@@ -252,58 +201,167 @@ class AITravelService {
         }
       """;
 
-        final response = await http.post(
-          url,
-          headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({
-            "contents": [{ "parts": [{ "text": prompt }] }]
-          }),
-        );
+            // ---------------------------------------------------------
+            // STAGE 2: Primary Intel Provider (Direct NVIDIA NIM API)
+            // ---------------------------------------------------------
+            try {
+                  print("🚀 Sending trip intel request directly to NVIDIA NIM for $cleanCity...");
 
-        if (response.statusCode != 200) {
-          throw Exception("AI API Error: ${response.body}");
-        }
+                  final nvidiaApiKey = dotenv.env['NVIDIA_API_KEY'];
+                  if (nvidiaApiKey == null || nvidiaApiKey.isEmpty) {
+                        throw Exception("NVIDIA_API_KEY missing from the app environment.");
+                  }
 
-        // 3. 🧹 CLEAN & PARSE JSON
-        final data = jsonDecode(response.body);
-        String rawText = data['candidates'][0]['content']['parts'][0]['text'];
+                  final nvidiaUrl = Uri.parse(
+                        'https://integrate.api.nvidia.com/v1/chat/completions',
+                  );
 
-        final startIndex = rawText.indexOf('{');
-        final endIndex = rawText.lastIndexOf('}');
+                  final response = await http.post(
+                        nvidiaUrl,
+                        headers: {
+                              'Content-Type': 'application/json',
+                              'Authorization': 'Bearer $nvidiaApiKey',
+                        },
+                        body: jsonEncode({
+                              'model': 'nvidia/nemotron-3.5-lightning-30b-a3b',
+                              'messages': [
+                                    {
+                                          'role': 'user',
+                                          'content': prompt,
+                                    },
+                              ],
+                              'temperature': 0.3,
+                              'max_tokens': 4096,
+                              'stream': false,
+                              'chat_template_kwargs': {
+                                    'enable_thinking': false,
+                              },
+                              'response_format': {
+                                    'type': 'json_object',
+                              },
+                        }),
+                  ).timeout(const Duration(seconds: 110));
 
-        if (startIndex == -1 || endIndex == -1) throw Exception("Invalid JSON");
+                  if (response.statusCode != 200) {
+                        throw Exception(
+                              'NVIDIA API Error [${response.statusCode}]: ${response.body}',
+                        );
+                  }
 
-        final cleanJsonString = rawText.substring(startIndex, endIndex + 1);
-        intelData = jsonDecode(cleanJsonString) as Map<String, dynamic>;
+                  final responseData = jsonDecode(response.body);
+                  final choices = responseData['choices'];
+                  if (choices is! List || choices.isEmpty) {
+                        throw const FormatException('NVIDIA returned no completion choices.');
+                  }
 
-      } catch (e) {
-        print("⚠️ FATAL CLIENT-SIDE FALLBACK ERROR: $e");
-        return {
-          "laws": [],
-          "logistics": [],
-          "magic_moment": null,
-          "scams": [],
-          "hacks": ["Error loading intel: $e"],
-          "sos": "112"
-        };
+                  final rawContent = choices[0]?['message']?['content'];
+                  final rawText = rawContent is String ? rawContent : '';
+                  if (rawText.trim().isEmpty) {
+                        throw const FormatException('NVIDIA returned an empty Intel response.');
+                  }
+
+                  final startIndex = rawText.indexOf('{');
+                  final endIndex = rawText.lastIndexOf('}');
+                  if (startIndex == -1 || endIndex == -1 || endIndex <= startIndex) {
+                        throw const FormatException('NVIDIA returned invalid Intel JSON.');
+                  }
+
+                  final cleanJsonString = rawText.substring(startIndex, endIndex + 1);
+                  final parsedIntel = jsonDecode(cleanJsonString);
+                  if (parsedIntel is! Map) {
+                        throw const FormatException('NVIDIA Intel response is not a JSON object.');
+                  }
+
+                  intelData = Map<String, dynamic>.from(parsedIntel);
+                  print("✅ Trip Intel successfully generated by NVIDIA NIM for $cleanCity.");
+            } on TimeoutException catch (e) {
+                  print("⏱️ NVIDIA Intel request timed out: $e");
+                  intelData = null;
+            } catch (e) {
+                  print("⚠️ NVIDIA Intel request failed: $e");
+                  intelData = null;
+            }
+
+            // ---------------------------------------------------------
+            // STAGE 3: Fallback Provider (Direct Gemini API)
+            // ---------------------------------------------------------
+            if (intelData == null) {
+                  print("⚡ NVIDIA unavailable. Routing trip intel directly to Gemini for $cleanCity...");
+                  try {
+                        final apiKey = dotenv.env['GEMINI_API_KEY'];
+                        if (apiKey == null || apiKey.isEmpty) {
+                              throw Exception("GEMINI_API_KEY missing");
+                        }
+
+                        // Using Gemini 2.5 Flash for the existing JSON response mechanism.
+                        final url = Uri.parse(
+                              'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$apiKey',
+                        );
+
+                        final response = await http.post(
+                              url,
+                              headers: {'Content-Type': 'application/json'},
+                              body: jsonEncode({
+                                    "contents": [
+                                          {
+                                                "parts": [
+                                                      {"text": prompt}
+                                                ]
+                                          }
+                                    ]
+                              }),
+                        );
+
+                        if (response.statusCode != 200) {
+                              throw Exception("AI API Error: ${response.body}");
+                        }
+
+                        // Clean and parse the JSON returned by Gemini.
+                        final data = jsonDecode(response.body);
+                        final rawText = data['candidates'][0]['content']['parts'][0]['text'] as String;
+
+                        final startIndex = rawText.indexOf('{');
+                        final endIndex = rawText.lastIndexOf('}');
+                        if (startIndex == -1 || endIndex == -1 || endIndex <= startIndex) {
+                              throw const FormatException("Gemini returned invalid Intel JSON.");
+                        }
+
+                        final cleanJsonString = rawText.substring(startIndex, endIndex + 1);
+                        final parsedIntel = jsonDecode(cleanJsonString);
+                        if (parsedIntel is! Map) {
+                              throw const FormatException("Gemini Intel response is not a JSON object.");
+                        }
+
+                        intelData = Map<String, dynamic>.from(parsedIntel);
+                        print("✅ Trip Intel successfully generated by direct Gemini API for $cleanCity.");
+                  } catch (e) {
+                        print("⚠️ FATAL CLIENT-SIDE INTEL GENERATION ERROR: $e");
+                        return {
+                              "laws": [],
+                              "logistics": [],
+                              "magic_moment": null,
+                              "scams": [],
+                              "hacks": ["Error loading intel: $e"],
+                              "sos": "112"
+                        };
+                  }
+            }
+
+            // ---------------------------------------------------------
+            // STAGE 4: 💾 SYNCHRONIZE DATABASE CACHE (Fixed with Upsert)
+            // ---------------------------------------------------------
+            if (intelData != null && needToUpdateCache) {
+                  try {
+                        await supabase.from('city_intel').upsert({
+                              'city_name': cleanCity,
+                              'data': intelData
+                        });
+                        print("💾 UPGRADED CACHE for $cleanCity to V3.");
+                  } catch (saveError) {
+                        print("⚠️ Supabase Save Warning: $saveError");
+                  }
+            }
+
+            return intelData;
       }
-    }
-
-    // ---------------------------------------------------------
-    // STAGE 5: 💾 SYNCHRONIZE DATABASE CACHE (Fixed with Upsert)
-    // ---------------------------------------------------------
-    if (intelData != null && needToUpdateCache) {
-      try {
-        await supabase.from('city_intel').upsert({
-          'city_name': cleanCity,
-          'data': intelData
-        });
-        print("💾 UPGRADED CACHE for $cleanCity to V3.");
-      } catch (saveError) {
-        print("⚠️ Supabase Save Warning: $saveError");
-      }
-    }
-
-    return intelData;
-  }
 }
