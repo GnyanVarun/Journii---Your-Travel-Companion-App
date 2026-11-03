@@ -76,7 +76,7 @@ class _TripIntelViewState extends State<TripIntelView> {
           return ListView(
             physics: const BouncingScrollPhysics(),
             padding: EdgeInsets.only(
-              top: MediaQuery.of(context).padding.top + 24,
+              top: 22,
               left: 24,
               right: 24,
               bottom: 60,
