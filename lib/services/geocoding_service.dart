@@ -461,6 +461,323 @@ class GeocodingService {
     }
   }
 
+  /// Resolves a destination's country without requiring one coordinate to win.
+  ///
+  /// This is intentionally separate from [geocodeDetailed]. It reuses the
+  /// existing candidate search, name validation, and scoring rules, but only
+  /// accepts a country when all geographically plausible same-name candidates
+  /// agree on the same country code. The existing POI geocoding safeguards are
+  /// not changed by this method.
+  static Future<DestinationCountryResult?> resolveDestinationCountry(
+      String destination,
+      ) async {
+    final originalQuery = destination.trim();
+    if (originalQuery.isEmpty) return null;
+
+    final targetName = _extractTargetName(originalQuery);
+    final targetAliases = _buildTargetNameAlternatives(targetName);
+    final queries = _buildQueryVariants(
+      originalQuery,
+      additionalTargetNames: targetAliases,
+      additionalLocalities: const <String>[],
+    );
+
+    // Destination-country resolution needs to distinguish a major geographic
+    // destination (for example, an island or province) from unrelated small
+    // settlements that happen to share its name in other countries.
+    // This ranking is used only by this country-scope resolver; normal POI
+    // candidate scoring and ambiguity checks remain untouched.
+    int destinationScale(Map<String, dynamic> candidate) {
+      final category =
+      (candidate['category'] ?? '').toString().trim().toLowerCase();
+      final type =
+      (candidate['type'] ?? '').toString().trim().toLowerCase();
+      final addressType =
+      (candidate['addresstype'] ?? '').toString().trim().toLowerCase();
+      final placeRank =
+      int.tryParse(candidate['place_rank']?.toString() ?? '');
+      final extraTags = candidate['extratags'] is Map
+          ? Map<String, dynamic>.from(candidate['extratags'] as Map)
+          : <String, dynamic>{};
+      final adminLevel =
+      int.tryParse(extraTags['admin_level']?.toString() ?? '');
+
+      // Strong destination-scale signals take precedence over settlement
+      // names, even when their names are an exact match.
+      if (const {
+        'island',
+        'archipelago',
+        'province',
+        'state',
+        'region',
+        'country',
+        'continent',
+      }.contains(addressType)) {
+        return 6;
+      }
+
+      if (const {'island', 'archipelago'}.contains(type)) {
+        return 6;
+      }
+
+      // OSM admin_level is useful when addresstype is generic. Lower levels
+      // describe broader administrative areas (e.g. a province rather than a
+      // city district). place_rank provides a fallback when admin_level is
+      // absent.
+      if (category == 'boundary' && type == 'administrative') {
+        if (adminLevel != null && adminLevel <= 4) return 6;
+        if (adminLevel != null && adminLevel <= 6) return 5;
+        if (placeRank != null && placeRank <= 12) return 5;
+        if (placeRank != null && placeRank <= 14) return 4;
+      }
+
+      if (const {
+        'county',
+        'municipality',
+        'city',
+        'town',
+        'district',
+        'city_district',
+        'state_district',
+        'borough',
+        'metropolitan_area',
+      }.contains(addressType)) {
+        return 3;
+      }
+
+      if (const {
+        'village',
+        'hamlet',
+        'suburb',
+        'neighbourhood',
+        'neighborhood',
+        'locality',
+        'quarter',
+        'isolated_dwelling',
+      }.contains(addressType)) {
+        return 2;
+      }
+
+      if (placeRank != null) {
+        if (placeRank <= 12) return 5;
+        if (placeRank <= 14) return 4;
+        if (placeRank <= 16) return 3;
+        if (placeRank <= 19) return 2;
+      }
+
+      if (category == 'place' &&
+          const {'city', 'town', 'municipality'}.contains(type)) {
+        return 3;
+      }
+
+      return 0;
+    }
+
+    // Keep distinct country codes separate even if a provider happens to
+    // return identical rounded coordinates for two records.
+    final candidateResultsByKey = <String, LatLngResult>{};
+    final candidateScoresByKey = <String, double>{};
+    final candidateSourcesByKey = <String, Map<String, dynamic>>{};
+
+    try {
+      for (final query in queries) {
+        final candidates = await _searchCandidates(query);
+        if (candidates == null || candidates.isEmpty) continue;
+
+        for (final candidate in candidates) {
+          final result = _toLatLngResult(candidate);
+          if (result == null) continue;
+
+          // Apply the same conservative place-name validation used by the
+          // normal geocoding mechanism before considering a country result.
+          if (!_hasSufficientNameEvidence(
+            candidate,
+            targetName,
+            additionalNames: targetAliases,
+          )) {
+            continue;
+          }
+
+          final score = _scoreCandidate(
+            candidate: candidate,
+            targetName: targetName,
+            query: query,
+            expectedCountryCode: null,
+            additionalNames: targetAliases,
+          );
+
+          final normalizedCountryCode =
+              result.countryCode?.trim().toLowerCase() ?? '';
+          final coordinateKey =
+              '${result.latitude.toStringAsFixed(4)},'
+              '${result.longitude.toStringAsFixed(4)}|'
+              '$normalizedCountryCode';
+
+          final previousScore =
+              candidateScoresByKey[coordinateKey] ?? double.negativeInfinity;
+          final previousScale = candidateSourcesByKey.containsKey(coordinateKey)
+              ? destinationScale(candidateSourcesByKey[coordinateKey]!)
+              : -1;
+          final currentScale = destinationScale(candidate);
+
+          if (score > previousScore ||
+              (score == previousScore && currentScale > previousScale)) {
+            candidateScoresByKey[coordinateKey] = score;
+            candidateResultsByKey[coordinateKey] = result;
+            candidateSourcesByKey[coordinateKey] =
+            Map<String, dynamic>.from(candidate);
+          }
+        }
+      }
+
+      if (candidateResultsByKey.isEmpty) {
+        print(
+          '⚠️ No reliable same-name candidates found to resolve the country '
+              'for "$destination".',
+        );
+        return null;
+      }
+
+      final bestScore = candidateScoresByKey.values.reduce(
+            (a, b) => a > b ? a : b,
+      );
+
+      if (bestScore < _minimumAcceptableScore) {
+        print(
+          '⚠️ Destination country could not be verified for "$destination". '
+              'Best candidate score: ${bestScore.toStringAsFixed(1)}.',
+        );
+        return null;
+      }
+
+      // Preserve the existing 4-point relevance window. Within that window,
+      // prefer the most authoritative geographic feature only when its
+      // country is unambiguous. Lower-level same-name settlements do not
+      // override a clear island/province/region/city destination match.
+      final plausibleEntries = candidateScoresByKey.entries
+          .where((entry) => entry.value >= bestScore - 4.0)
+          .toList();
+      var countryDecisionEntries = plausibleEntries;
+
+      final highestDestinationScale = plausibleEntries
+          .map((entry) => destinationScale(candidateSourcesByKey[entry.key]!))
+          .reduce((a, b) => a > b ? a : b);
+
+      if (highestDestinationScale >= 3) {
+        final destinationScaleEntries = plausibleEntries.where(
+              (entry) =>
+          destinationScale(candidateSourcesByKey[entry.key]!) ==
+              highestDestinationScale,
+        ).toList();
+
+        final destinationScaleCountries = <String>{};
+        var hasMissingDestinationScaleCountry = false;
+        for (final entry in destinationScaleEntries) {
+          final code = candidateResultsByKey[entry.key]
+              ?.countryCode
+              ?.trim()
+              .toLowerCase() ??
+              '';
+          if (code.isEmpty) {
+            hasMissingDestinationScaleCountry = true;
+            break;
+          }
+          destinationScaleCountries.add(code);
+        }
+
+        // Only discard smaller competing names when all strongest geographic
+        // matches agree on one known country. Two equally authoritative
+        // matches in different countries remain genuinely ambiguous.
+        if (!hasMissingDestinationScaleCountry &&
+            destinationScaleCountries.length == 1) {
+          countryDecisionEntries = destinationScaleEntries;
+
+          final ignoredCount =
+              plausibleEntries.length - destinationScaleEntries.length;
+          if (ignoredCount > 0) {
+            final selectedCode = destinationScaleCountries.single;
+            print(
+              '🧭 Destination-scale match for "$destination" supports '
+                  '$selectedCode. Ignoring $ignoredCount lower-level same-name '
+                  'candidate(s) from the country decision.',
+            );
+          }
+        }
+      }
+
+      final plausibleCountryCodes = <String>{};
+      for (final entry in countryDecisionEntries) {
+        final candidateCountryCode = candidateResultsByKey[entry.key]
+            ?.countryCode
+            ?.trim()
+            .toLowerCase() ??
+            '';
+
+        // Missing country metadata on a plausible candidate means the result
+        // cannot safely establish that every competing candidate is in one
+        // country.
+        if (candidateCountryCode.isEmpty) {
+          print(
+            '⚠️ Country consensus rejected for "$destination": a plausible '
+                'same-name candidate has no country code.',
+          );
+          return null;
+        }
+
+        plausibleCountryCodes.add(candidateCountryCode);
+      }
+
+      if (plausibleCountryCodes.length != 1) {
+        print(
+          '⚠️ Country consensus rejected for "$destination": plausible '
+              'same-name candidates belong to different countries '
+              '(${plausibleCountryCodes.join(', ')}).',
+        );
+        return null;
+      }
+
+      final countryCode = plausibleCountryCodes.single;
+      final rankedPlausibleEntries = [...countryDecisionEntries]
+        ..sort((a, b) => b.value.compareTo(a.value));
+
+      String? countryName;
+      String? selectedType;
+
+      for (final entry in rankedPlausibleEntries) {
+        final result = candidateResultsByKey[entry.key]!;
+        final candidateCountryName = result.countryName?.trim() ?? '';
+        if (countryName == null && candidateCountryName.isNotEmpty) {
+          countryName = candidateCountryName;
+        }
+
+        if (selectedType == null && (result.type?.trim().isNotEmpty ?? false)) {
+          selectedType = result.type!.trim().toLowerCase();
+        }
+
+        if (countryName != null && selectedType != null) break;
+      }
+
+      print(
+        '✅ Destination country consensus for "$destination": '
+            '${countryName ?? countryCode} ($countryCode) from '
+            '${countryDecisionEntries.length} authoritative/plausible candidate(s). '
+            'No destination coordinates were selected.',
+      );
+
+      return DestinationCountryResult(
+        countryCode: countryCode,
+        countryName: countryName,
+        type: selectedType,
+      );
+    } catch (error) {
+      print(
+        '💥 Destination country resolution failed for "$destination": '
+            '$error',
+      );
+      return null;
+    }
+  }
+
   static Future<LatLngResult?> geocode(String placeName) async {
     return geocodeDetailed(placeName);
   }
@@ -3366,5 +3683,21 @@ class _ContextAnchor {
   const _ContextAnchor({
     required this.latitude,
     required this.longitude,
+  });
+}
+
+/// Country metadata returned by [GeocodingService.resolveDestinationCountry].
+///
+/// Deliberately contains no coordinates: this result establishes the country
+/// scope for subsequent POI lookups, not a destination map pin.
+class DestinationCountryResult {
+  final String countryCode;
+  final String? countryName;
+  final String? type;
+
+  const DestinationCountryResult({
+    required this.countryCode,
+    this.countryName,
+    this.type,
   });
 }

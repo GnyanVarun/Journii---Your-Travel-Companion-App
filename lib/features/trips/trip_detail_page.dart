@@ -77,6 +77,189 @@ class _TripDetailPageState extends ConsumerState<TripDetailPage> {
   OverlayEntry? _moveOverlayEntry;
   int? _hoveredDayIndex;
 
+  // --------------------------------------------------
+  // 🌍 ITINERARY GEOCODING STATUS
+  // --------------------------------------------------
+  bool _isGeocodingInProgress = false;
+  bool _isGeocodingComplete = false;
+  bool _geocodingWasSkipped = false;
+  int _geocodingProcessed = 0;
+  int _geocodingTotal = 0;
+  int _geocodingMapped = 0;
+  int _geocodingStatusRunId = 0;
+  String _geocodingStatusMessage = '';
+
+  void _startGeocodingStatus(int total) {
+    if (!mounted) return;
+
+    _geocodingStatusRunId++;
+    setState(() {
+      _isGeocodingInProgress = true;
+      _isGeocodingComplete = false;
+      _geocodingWasSkipped = false;
+      _geocodingProcessed = 0;
+      _geocodingTotal = total;
+      _geocodingMapped = 0;
+      _geocodingStatusMessage = 'Preparing to locate your itinerary places…';
+    });
+  }
+
+  void _updateGeocodingStatus({
+    required int processed,
+    required int total,
+    required int mapped,
+    required String message,
+  }) {
+    if (!mounted || !_isGeocodingInProgress) return;
+
+    setState(() {
+      _geocodingProcessed = processed;
+      _geocodingTotal = total;
+      _geocodingMapped = mapped;
+      _geocodingStatusMessage = message;
+    });
+  }
+
+  void _finishGeocodingStatus({
+    required int mapped,
+    required int total,
+    required String message,
+    bool skipped = false,
+  }) {
+    if (!mounted) return;
+
+    final runId = ++_geocodingStatusRunId;
+    setState(() {
+      _isGeocodingInProgress = false;
+      _isGeocodingComplete = true;
+      _geocodingWasSkipped = skipped;
+      _geocodingProcessed = total;
+      _geocodingTotal = total;
+      _geocodingMapped = mapped;
+      _geocodingStatusMessage = message;
+    });
+
+    // Keep the completion state visible briefly, then remove the indicator.
+    Future.delayed(const Duration(seconds: 3), () {
+      if (!mounted || runId != _geocodingStatusRunId) return;
+      setState(() {
+        _isGeocodingComplete = false;
+      });
+    });
+  }
+
+  Widget _buildGeocodingStatusIndicator(bool isDark, Color accentColor) {
+    final isVisible = _isGeocodingInProgress || _isGeocodingComplete;
+    final cardColor = isDark ? const Color(0xFF1C1C1E) : Colors.white;
+    final mutedColor = isDark ? Colors.white60 : Colors.black54;
+    final successColor = Colors.green.shade600;
+    final statusColor = _isGeocodingInProgress
+        ? accentColor
+        : _geocodingWasSkipped
+        ? Colors.orange.shade700
+        : successColor;
+
+    return AnimatedSize(
+      duration: const Duration(milliseconds: 220),
+      curve: Curves.easeInOut,
+      alignment: Alignment.topCenter,
+      child: isVisible
+          ? Padding(
+        padding: const EdgeInsets.fromLTRB(24, 0, 24, 10),
+        child: Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+          decoration: BoxDecoration(
+            color: cardColor,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: statusColor.withOpacity(isDark ? 0.30 : 0.18),
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.035),
+                blurRadius: 10,
+                offset: const Offset(0, 3),
+              ),
+            ],
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                children: [
+                  if (_isGeocodingInProgress)
+                    SizedBox(
+                      width: 19,
+                      height: 19,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2.2,
+                        color: statusColor,
+                      ),
+                    )
+                  else
+                    Icon(
+                      _geocodingWasSkipped
+                          ? Icons.info_outline_rounded
+                          : Icons.check_circle_rounded,
+                      size: 21,
+                      color: statusColor,
+                    ),
+                  const SizedBox(width: 11),
+                  Expanded(
+                    child: Text(
+                      _geocodingStatusMessage,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: isDark ? Colors.white : Colors.black87,
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                  if (_isGeocodingInProgress && _geocodingTotal > 0) ...[
+                    const SizedBox(width: 8),
+                    Text(
+                      '$_geocodingProcessed/$_geocodingTotal',
+                      style: TextStyle(
+                        color: mutedColor,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ] else if (_isGeocodingComplete && !_geocodingWasSkipped) ...[
+                    const SizedBox(width: 8),
+                    Text(
+                      '$_geocodingMapped/$_geocodingTotal mapped',
+                      style: TextStyle(
+                        color: mutedColor,
+                        fontSize: 10.5,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+              if (_isGeocodingInProgress) ...[
+                const SizedBox(height: 9),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(10),
+                  child: LinearProgressIndicator(
+                    minHeight: 3,
+                    backgroundColor: statusColor.withOpacity(0.12),
+                    valueColor: AlwaysStoppedAnimation<Color>(statusColor),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      )
+          : const SizedBox.shrink(),
+    );
+  }
+
   @override
   void initState() {
     super.initState();
@@ -161,6 +344,10 @@ class _TripDetailPageState extends ConsumerState<TripDetailPage> {
             accentColor,
             accentForeground,
           ),
+
+          // 🌍 MINI GEOCODING STATUS — visible only while mapping or briefly
+          // after completion. The itinerary content and its controls remain intact.
+          _buildGeocodingStatusIndicator(isDark, accentColor),
 
           // Body Content
           Expanded(
@@ -1915,6 +2102,10 @@ class _TripDetailPageState extends ConsumerState<TripDetailPage> {
       newItems: newItems,
     );
 
+    // Start the user-facing indicator only after the accepted itinerary has
+    // been saved, immediately before destination resolution/geocoding begins.
+    _startGeocodingStatus(newItems.length);
+
     print(
       "🌍 STARTING GEOCODING for ${newItems.length} items...",
     );
@@ -1941,6 +2132,12 @@ class _TripDetailPageState extends ConsumerState<TripDetailPage> {
         "⚠️ Trip destination is empty. "
             "Skipping geocoding.",
       );
+      _finishGeocodingStatus(
+        mapped: 0,
+        total: newItems.length,
+        message: 'Location mapping skipped: trip destination is missing.',
+        skipped: true,
+      );
       return;
     }
 
@@ -1957,8 +2154,19 @@ class _TripDetailPageState extends ConsumerState<TripDetailPage> {
     // Example:
     // Italy → countryCode = it
     // --------------------------------------------------
-    final destinationInfo =
-    await _resolveDestinationScope(searchScope);
+    Map<String, dynamic>? destinationInfo;
+    try {
+      destinationInfo = await _resolveDestinationScope(searchScope);
+    } catch (e) {
+      print('⚠️ Destination geocoding failed: $e');
+      _finishGeocodingStatus(
+        mapped: 0,
+        total: newItems.length,
+        message: 'Could not resolve the destination. Location mapping stopped.',
+        skipped: true,
+      );
+      return;
+    }
 
     if (destinationInfo == null) {
       print(
@@ -1968,6 +2176,12 @@ class _TripDetailPageState extends ConsumerState<TripDetailPage> {
       print(
         "🛑 Skipping itinerary geocoding because the "
             "destination country could not be determined.",
+      );
+      _finishGeocodingStatus(
+        mapped: 0,
+        total: newItems.length,
+        message: 'Could not verify the destination country. Location mapping stopped.',
+        skipped: true,
       );
       return;
     }
@@ -1987,6 +2201,12 @@ class _TripDetailPageState extends ConsumerState<TripDetailPage> {
       );
       print(
         "🛑 Skipping itinerary geocoding for safety.",
+      );
+      _finishGeocodingStatus(
+        mapped: 0,
+        total: newItems.length,
+        message: 'Destination country could not be verified. Location mapping stopped.',
+        skipped: true,
       );
       return;
     }
@@ -2047,7 +2267,15 @@ class _TripDetailPageState extends ConsumerState<TripDetailPage> {
     // 🌍 PRIMARY GEOCODING PASS
     // Preserve every item even when no safe match is found.
     // --------------------------------------------------
-    for (final item in newItems) {
+    for (var itemIndex = 0; itemIndex < newItems.length; itemIndex++) {
+      final item = newItems[itemIndex];
+      _updateGeocodingStatus(
+        processed: itemIndex + 1,
+        total: newItems.length,
+        mapped: successfulItemIds.length,
+        message: 'Locating place ${itemIndex + 1} of ${newItems.length}',
+      );
+
       try {
         final suppliedContext = geoContextByItemId[item.id]?.trim() ?? '';
         final nearbyAnchors = suppliedContext.isEmpty
@@ -2081,6 +2309,12 @@ class _TripDetailPageState extends ConsumerState<TripDetailPage> {
             "⚠️ Could not locate ${item.title}. "
                 "Keeping itinerary item without coordinates.",
           );
+          _updateGeocodingStatus(
+            processed: itemIndex + 1,
+            total: newItems.length,
+            mapped: successfulItemIds.length,
+            message: 'Checked ${itemIndex + 1} of ${newItems.length} places',
+          );
           continue;
         }
 
@@ -2110,7 +2344,23 @@ class _TripDetailPageState extends ConsumerState<TripDetailPage> {
           "💥 ERROR processing ${item.title}: $e",
         );
       }
+
+      _updateGeocodingStatus(
+        processed: itemIndex + 1,
+        total: newItems.length,
+        mapped: successfulItemIds.length,
+        message: 'Checked ${itemIndex + 1} of ${newItems.length} places',
+      );
     }
+
+    _updateGeocodingStatus(
+      processed: 0,
+      // Hide the primary-pass counter while the contextual retry pass runs;
+      // its duration depends on which places need another lookup.
+      total: 0,
+      mapped: successfulItemIds.length,
+      message: 'Checking unresolved locations…',
+    );
 
     // --------------------------------------------------
     // 🔁 CONTEXTUAL RETRY PASS
@@ -2202,6 +2452,12 @@ class _TripDetailPageState extends ConsumerState<TripDetailPage> {
       "🏁 GEOCODING COMPLETE. "
           "Successfully mapped "
           "${successfulItemIds.length} / ${newItems.length} places.",
+    );
+
+    _finishGeocodingStatus(
+      mapped: successfulItemIds.length,
+      total: newItems.length,
+      message: 'Location mapping complete.',
     );
   }
 
@@ -2326,35 +2582,26 @@ class _TripDetailPageState extends ConsumerState<TripDetailPage> {
       String destination,
       ) async {
     final result =
-    await GeocodingService.geocodeDetailed(destination);
+    await GeocodingService.resolveDestinationCountry(destination);
 
     if (result == null) {
       return null;
     }
 
-    final latitude = result.latitude;
-    final longitude = result.longitude;
-
-    final countryCode = result.countryCode?.toLowerCase();
+    final countryCode = result.countryCode.toLowerCase();
     final countryName = result.countryName;
     final type = result.type?.toLowerCase() ?? '';
 
-    if (countryCode == null || countryCode.isEmpty) {
-      print(
-        "⚠️ Country code unavailable for "
-            "$destination",
-      );
-      return null;
-    }
-
     print(
-      "🧭 DESTINATION RESOLVED: "
-          "$destination → ${result.displayName}",
+      "🧭 DESTINATION COUNTRY RESOLVED: "
+          "$destination → ${countryName ?? countryCode} ($countryCode).",
     );
 
+    // Keep the existing local map shape. Coordinates are intentionally null:
+    // this step establishes only the country scope and does not select a pin.
     return {
-      'latitude': latitude,
-      'longitude': longitude,
+      'latitude': null,
+      'longitude': null,
       'countryCode': countryCode,
       'countryName': countryName,
       'type': type,
