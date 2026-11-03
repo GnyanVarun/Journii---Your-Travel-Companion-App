@@ -16,6 +16,10 @@ class TripListPage extends ConsumerStatefulWidget {
 }
 
 class _TripListPageState extends ConsumerState<TripListPage> {
+  // Upcoming trips are shown first by default; the other filters keep
+  // completed and undated trips easy to access without changing trip data.
+  _TripListFilter _selectedFilter = _TripListFilter.upcoming;
+
   @override
   void initState() {
     super.initState();
@@ -23,6 +27,74 @@ class _TripListPageState extends ConsumerState<TripListPage> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _runAutoSync();
     });
+  }
+
+  void _selectFilter(_TripListFilter filter) {
+    if (_selectedFilter == filter) return;
+    setState(() {
+      _selectedFilter = filter;
+    });
+  }
+
+  TripStatus _statusForTrip(Trip trip) {
+    if (trip.startDate == null || trip.endDate == null) {
+      return TripStatus.unknown;
+    }
+
+    final today = DateTime.now();
+    final start = DateTime(
+      trip.startDate!.year,
+      trip.startDate!.month,
+      trip.startDate!.day,
+    );
+    final end = DateTime(
+      trip.endDate!.year,
+      trip.endDate!.month,
+      trip.endDate!.day,
+    );
+    final now = DateTime(today.year, today.month, today.day);
+
+    if (now.isBefore(start)) return TripStatus.upcoming;
+    if (now.isAfter(end)) return TripStatus.past;
+    return TripStatus.ongoing;
+  }
+
+  bool _matchesSelectedFilter(Trip trip) {
+    if (_selectedFilter == _TripListFilter.all) return true;
+
+    final status = _statusForTrip(trip);
+    switch (_selectedFilter) {
+      case _TripListFilter.upcoming:
+        return status == TripStatus.upcoming;
+      case _TripListFilter.ongoing:
+        return status == TripStatus.ongoing;
+      case _TripListFilter.past:
+        return status == TripStatus.past;
+      case _TripListFilter.planning:
+        return status == TripStatus.unknown;
+      case _TripListFilter.all:
+        return true;
+    }
+  }
+
+  int _countTrips(List<Trip> trips, _TripListFilter filter) {
+    if (filter == _TripListFilter.all) return trips.length;
+
+    return trips.where((trip) {
+      final status = _statusForTrip(trip);
+      switch (filter) {
+        case _TripListFilter.upcoming:
+          return status == TripStatus.upcoming;
+        case _TripListFilter.ongoing:
+          return status == TripStatus.ongoing;
+        case _TripListFilter.past:
+          return status == TripStatus.past;
+        case _TripListFilter.planning:
+          return status == TripStatus.unknown;
+        case _TripListFilter.all:
+          return true;
+      }
+    }).length;
   }
 
   Future<void> _runAutoSync() async {
@@ -46,6 +118,7 @@ class _TripListPageState extends ConsumerState<TripListPage> {
     // 🟢 DYNAMIC THEME COLORS
     final accentColor = isDark ? const Color(0xFF00E5FF) : const Color(0xFF2E3192);
     final accentForeground = isDark ? Colors.black : Colors.white;
+    final filteredTrips = trips.where(_matchesSelectedFilter).toList();
 
     return Scaffold(
       backgroundColor: bgColor,
@@ -63,6 +136,45 @@ class _TripListPageState extends ConsumerState<TripListPage> {
           ),
         ),
         actions: [
+          Padding(
+            padding: const EdgeInsets.only(right: 8.0),
+            child: Container(
+              decoration: BoxDecoration(
+                color: isDark ? Colors.white.withOpacity(0.05) : Colors.black.withOpacity(0.05),
+                shape: BoxShape.circle,
+              ),
+              child: Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  IconButton(
+                    icon: Icon(
+                      Icons.filter_list_rounded,
+                      color: isDark ? Colors.white70 : Colors.black87,
+                    ),
+                    tooltip: 'Filter trips: ${_filterLabel(_selectedFilter)}',
+                    onPressed: () => _showTripFilterSheet(trips),
+                  ),
+                  if (_selectedFilter != _TripListFilter.all)
+                    Positioned(
+                      top: 9,
+                      right: 9,
+                      child: Container(
+                        width: 7,
+                        height: 7,
+                        decoration: BoxDecoration(
+                          color: accentColor,
+                          shape: BoxShape.circle,
+                          border: Border.all(
+                            color: bgColor,
+                            width: 1,
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
           Padding(
             padding: const EdgeInsets.only(right: 16.0),
             child: Container(
@@ -118,13 +230,26 @@ class _TripListPageState extends ConsumerState<TripListPage> {
       ),
       body: trips.isEmpty
           ? _EmptyState(onCreate: () => _openCreateTripSheet(context))
+          : filteredTrips.isEmpty
+          ? _FilteredTripsEmptyState(
+        filter: _selectedFilter,
+        onShowAll: () => _selectFilter(_TripListFilter.all),
+        isDark: isDark,
+        accentColor: accentColor,
+      )
           : ListView.builder(
         physics: const BouncingScrollPhysics(),
-        // Padding ensures the last item scrolls past the FAB & Nav Bar
-        padding: const EdgeInsets.only(top: 16, left: 24, right: 24, bottom: 180),
-        itemCount: trips.length,
+        // Keep the original list spacing so the trip cards retain
+        // their existing layout and remain clear of the FAB/nav bar.
+        padding: const EdgeInsets.only(
+          top: 16,
+          left: 24,
+          right: 24,
+          bottom: 180,
+        ),
+        itemCount: filteredTrips.length,
         itemBuilder: (context, index) {
-          final trip = trips[index];
+          final trip = filteredTrips[index];
           return _TripTile(trip: trip);
         },
       ),
@@ -149,6 +274,199 @@ class _TripListPageState extends ConsumerState<TripListPage> {
     );
   }
 
+  String _filterLabel(_TripListFilter filter) {
+    switch (filter) {
+      case _TripListFilter.all:
+        return 'All trips';
+      case _TripListFilter.upcoming:
+        return 'Upcoming';
+      case _TripListFilter.ongoing:
+        return 'Ongoing';
+      case _TripListFilter.past:
+        return 'Past';
+      case _TripListFilter.planning:
+        return 'Planning';
+    }
+  }
+
+  IconData _filterIcon(_TripListFilter filter) {
+    switch (filter) {
+      case _TripListFilter.all:
+        return Icons.grid_view_rounded;
+      case _TripListFilter.upcoming:
+        return Icons.flight_takeoff_rounded;
+      case _TripListFilter.ongoing:
+        return Icons.route_rounded;
+      case _TripListFilter.past:
+        return Icons.history_rounded;
+      case _TripListFilter.planning:
+        return Icons.edit_calendar_rounded;
+    }
+  }
+
+  Color _filterStatusColor(_TripListFilter filter, Color accentColor) {
+    switch (filter) {
+      case _TripListFilter.all:
+        return accentColor;
+      case _TripListFilter.upcoming:
+        return const Color(0xFFE94057);
+      case _TripListFilter.ongoing:
+        return const Color(0xFF11998E);
+      case _TripListFilter.past:
+        return Colors.grey.shade600;
+      case _TripListFilter.planning:
+        return accentColor;
+    }
+  }
+
+  Future<void> _showTripFilterSheet(List<Trip> trips) async {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final accentColor = isDark ? const Color(0xFF00E5FF) : const Color(0xFF2E3192);
+    final sheetColor = isDark ? const Color(0xFF1C1C1E) : Colors.white;
+    final primaryText = isDark ? Colors.white : const Color(0xFF1A1A1A);
+    final secondaryText = isDark ? Colors.white60 : const Color(0xFF6B6B6B);
+
+    final selectedFilter = await showModalBottomSheet<_TripListFilter>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (sheetContext) {
+        return Container(
+          decoration: BoxDecoration(
+            color: sheetColor,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+          ),
+          child: SafeArea(
+            top: false,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(24, 12, 24, 20),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Center(
+                    child: Container(
+                      width: 40,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: isDark ? Colors.white24 : Colors.black12,
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 22),
+                  Text(
+                    'Filter journeys',
+                    style: TextStyle(
+                      color: primaryText,
+                      fontSize: 21,
+                      fontWeight: FontWeight.w900,
+                      letterSpacing: -0.4,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Choose which trips you want to see.',
+                    style: TextStyle(
+                      color: secondaryText,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  const SizedBox(height: 18),
+                  ...[
+                    _TripListFilter.upcoming,
+                    _TripListFilter.ongoing,
+                    _TripListFilter.past,
+                    _TripListFilter.planning,
+                    _TripListFilter.all,
+                  ].map((filter) {
+                    final selected = filter == _selectedFilter;
+                    final statusColor = _filterStatusColor(filter, accentColor);
+                    final optionBackground = selected
+                        ? accentColor.withOpacity(isDark ? 0.16 : 0.09)
+                        : (isDark
+                        ? Colors.white.withOpacity(0.035)
+                        : Colors.black.withOpacity(0.025));
+
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: Material(
+                        color: optionBackground,
+                        borderRadius: BorderRadius.circular(16),
+                        child: InkWell(
+                          borderRadius: BorderRadius.circular(16),
+                          onTap: () => Navigator.pop(sheetContext, filter),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 14,
+                              vertical: 12,
+                            ),
+                            child: Row(
+                              children: [
+                                Container(
+                                  width: 40,
+                                  height: 40,
+                                  decoration: BoxDecoration(
+                                    color: statusColor.withOpacity(0.12),
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                  child: Icon(
+                                    _filterIcon(filter),
+                                    color: statusColor,
+                                    size: 20,
+                                  ),
+                                ),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: Text(
+                                    _filterLabel(filter),
+                                    style: TextStyle(
+                                      color: primaryText,
+                                      fontSize: 15,
+                                      fontWeight: selected
+                                          ? FontWeight.w800
+                                          : FontWeight.w600,
+                                    ),
+                                  ),
+                                ),
+                                Text(
+                                  '${_countTrips(trips, filter)}',
+                                  style: TextStyle(
+                                    color: secondaryText,
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                                const SizedBox(width: 12),
+                                Icon(
+                                  selected
+                                      ? Icons.check_circle_rounded
+                                      : Icons.circle_outlined,
+                                  color: selected
+                                      ? accentColor
+                                      : (isDark ? Colors.white24 : Colors.black26),
+                                  size: 20,
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    );
+                  }),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+
+    if (!mounted || selectedFilter == null) return;
+    _selectFilter(selectedFilter);
+  }
+
   void _openCreateTripSheet(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
 
@@ -162,6 +480,103 @@ class _TripListPageState extends ConsumerState<TripListPage> {
         borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
       ),
       builder: (_) => const CreateTripSheet(),
+    );
+  }
+}
+
+enum _TripListFilter { all, upcoming, ongoing, past, planning }
+
+class _FilteredTripsEmptyState extends StatelessWidget {
+  final _TripListFilter filter;
+  final VoidCallback onShowAll;
+  final bool isDark;
+  final Color accentColor;
+
+  const _FilteredTripsEmptyState({
+    required this.filter,
+    required this.onShowAll,
+    required this.isDark,
+    required this.accentColor,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    late final String title;
+    late final String message;
+
+    switch (filter) {
+      case _TripListFilter.upcoming:
+        title = 'No upcoming trips';
+        message = 'Your future journeys will appear here.';
+        break;
+      case _TripListFilter.ongoing:
+        title = 'No trips in progress';
+        message = 'Trips that are currently underway will appear here.';
+        break;
+      case _TripListFilter.past:
+        title = 'No past trips';
+        message = 'Your completed journeys will appear here.';
+        break;
+      case _TripListFilter.planning:
+        title = 'No trips in planning';
+        message = 'Trips without dates will appear here.';
+        break;
+      case _TripListFilter.all:
+        title = 'No trips found';
+        message = 'Create a journey to get started.';
+        break;
+    }
+
+    final textColor = isDark ? Colors.white : const Color(0xFF1A1A1A);
+    final mutedColor = isDark ? Colors.white60 : const Color(0xFF6B6B6B);
+
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 36),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.flight_takeoff_rounded,
+              size: 48,
+              color: accentColor.withOpacity(0.75),
+            ),
+            const SizedBox(height: 16),
+            Text(
+              title,
+              style: TextStyle(
+                color: textColor,
+                fontSize: 19,
+                fontWeight: FontWeight.w800,
+              ),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              message,
+              style: TextStyle(
+                color: mutedColor,
+                fontSize: 14,
+                height: 1.4,
+              ),
+              textAlign: TextAlign.center,
+            ),
+            if (filter != _TripListFilter.all) ...[
+              const SizedBox(height: 16),
+              TextButton(
+                onPressed: onShowAll,
+                child: Text(
+                  'View all trips',
+                  style: TextStyle(
+                    color: accentColor,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
     );
   }
 }
