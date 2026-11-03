@@ -1,5 +1,6 @@
 import 'dart:ui';
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -68,8 +69,9 @@ class _ExploreTabState extends ConsumerState<ExploreTab> {
   static const Duration _eventCacheDuration =
   Duration(hours: 12);
 
+  // Bumped to invalidate cached events classified by the older logic.
   static const String _eventCachePrefix =
-      'journii_explore_events_';
+      'journii_explore_openagenda_events_longdesc_v3_';
 
   final Map<String, LatLng> _destinationCache = {};
   final Map<String, String?> _destinationCountryCodeCache = {};
@@ -94,7 +96,7 @@ class _ExploreTabState extends ConsumerState<ExploreTab> {
   // TRANSLATED EVENT DISPLAY CACHE
   // ---------------------------------------------------------------------------
   // These values are presentation-only. The original event name/venue remain
-  // untouched for StungEvents, Mapbox geocoding, caching, and backend use.
+  // untouched for OpenAgenda, Mapbox geocoding, caching, and backend use.
   final Map<String, String> _translatedEventNames = {};
   final Map<String, String> _translatedEventVenues = {};
   int _displayTranslationRequestId = 0;
@@ -746,7 +748,7 @@ class _ExploreTabState extends ConsumerState<ExploreTab> {
     }
 
     // -------------------------------------------------------------------------
-    // 2. NO VALID CACHE → STUNGEVENTS
+    // 2. NO VALID CACHE → OPENAGENDA
     // -------------------------------------------------------------------------
 
     setState(() {
@@ -755,7 +757,7 @@ class _ExploreTabState extends ConsumerState<ExploreTab> {
     });
 
     final generatedEvents =
-    await _fetchEventsFromStungEvents(
+    await _fetchEventsFromOpenAgenda(
       cityName: cityName,
       latitude: latitude,
       longitude: longitude,
@@ -906,436 +908,968 @@ class _ExploreTabState extends ConsumerState<ExploreTab> {
   }
 
   // ===========================================================================
-  // STUNGEVENTS EVENT DISCOVERY
+  // OPENAGENDA EVENT DISCOVERY
   // ===========================================================================
 
+  static const Duration _openAgendaRequestTimeout =
+  Duration(seconds: 20);
+
+  static const int _openAgendaAgendaFallbackLimit = 8;
+  static const int _openAgendaAgendaBatchSize = 4;
+
   Future<List<Map<String, dynamic>>>
-  _fetchEventsFromStungEvents({
+  _fetchEventsFromOpenAgenda({
     required String cityName,
     required double latitude,
     required double longitude,
     String? countryCode,
     String destinationType = '',
   }) async {
-    const host = 'api.stungevents.com';
-    const path = '/events';
+    final apiKey = dotenv.env['OPENAGENDA_API_KEY']?.trim() ?? '';
 
-    final normalizedCountryCode =
-    countryCode?.trim().toUpperCase();
-
-    final isCountry = destinationType == 'country';
-
-    const cityLikeTypes = {
-      'place',
-      'locality',
-      'neighborhood',
-      'city',
-      'district',
-      'region',
-    };
-
-    final baseParams = <String, String>{
-      'limit': '100',
-      'offset': '0',
-    };
-
-    // StungEvents documents city and country as first-class filters.
-    // For countries, the resolved Mapbox display name (for example Japan)
-    // is the best value for the country filter. For city-like destinations,
-    // use the destination name directly.
-    if (isCountry) {
-      if (cityName.trim().isNotEmpty) {
-        baseParams['country'] = cityName.trim();
-      }
-    } else if (cityLikeTypes.contains(destinationType) &&
-        cityName.trim().isNotEmpty) {
-      baseParams['city'] = cityName.trim();
-    } else if (cityName.trim().isNotEmpty) {
-      // Keep the existing region/district retrieval mechanism functional by
-      // attempting the destination name as a city/prefix search first.
-      baseParams['city'] = cityName.trim();
+    if (apiKey.isEmpty) {
+      debugPrint(
+        'OpenAgenda API key is missing. Add OPENAGENDA_API_KEY to .env.',
+      );
+      return [];
     }
 
-    Future<List<Map<String, dynamic>>> requestEvents(
-        Map<String, String> params) async {
-      final uri = Uri.https(
-        host,
-        path,
-        params,
+    // Only a public/read key belongs in a Flutter application. Secret keys
+    // (oa_sk_...) must remain on a server and must never be bundled in the app.
+    if (apiKey.startsWith('oa_sk_')) {
+      debugPrint(
+        'OpenAgenda secret key detected. Use a public oa_pk_ read key in Flutter.',
       );
-
-      try {
-        final response = await http.get(
-          uri,
-          headers: const {
-            'Accept': 'application/json',
-          },
-        );
-
-        if (response.statusCode != 200) {
-          debugPrint(
-            "StungEvents error ${response.statusCode}: ${response.body}",
-          );
-          return [];
-        }
-
-        final decoded = json.decode(response.body);
-
-        if (decoded is! Map) {
-          debugPrint(
-            "StungEvents returned an unexpected response shape.",
-          );
-          return [];
-        }
-
-        final rawEvents = decoded['events'];
-
-        if (rawEvents is! List) {
-          debugPrint(
-            "StungEvents response did not contain an events array.",
-          );
-          return [];
-        }
-
-        return rawEvents
-            .whereType<Map>()
-            .map((event) => Map<String, dynamic>.from(event))
-            .toList();
-      } catch (e) {
-        debugPrint(
-          "StungEvents event retrieval error: $e",
-        );
-        return [];
-      }
+      return [];
     }
 
     try {
-      var rawEvents = await requestEvents(baseParams);
-
-      // If a non-country destination did not return anything, try the
-      // country filter with the resolved ISO-2 code as a conservative
-      // fallback. This does not alter the UI or cache mechanism; it only
-      // gives the retrieval layer another documented endpoint filter to use.
-      if (rawEvents.isEmpty &&
-          !isCountry &&
-          normalizedCountryCode != null &&
-          normalizedCountryCode.length == 2) {
-        final fallbackParams = <String, String>{
-          'country': normalizedCountryCode,
-          'limit': '100',
-          'offset': '0',
-        };
-
-        debugPrint(
-          "StungEvents returned no events for $cityName. Trying country fallback $normalizedCountryCode.",
-        );
-
-        rawEvents = await requestEvents(fallbackParams);
-      }
-
-      if (rawEvents.isEmpty) {
-        debugPrint(
-          "StungEvents returned no events for $cityName.",
-        );
-        return [];
-      }
-
-      final normalized = <Map<String, dynamic>>[];
-      final seenKeys = <String>{};
-
-      for (int index = 0; index < rawEvents.length; index++) {
-        final event = _normalizeStungEvent(
-          rawEvents[index],
-          cityName,
-          index,
-        );
-
-        if (event == null) {
-          continue;
-        }
-
-        final key =
-            '${event['name']?.toString().toLowerCase().trim()}|'
-            '${event['venue']?.toString().toLowerCase().trim()}|'
-            '${event['date']?.toString().trim()}';
-
-        if (seenKeys.contains(key)) {
-          continue;
-        }
-
-        seenKeys.add(key);
-        normalized.add(event);
-
-        // Preserve the same practical 8–15 event display range used by the
-        // previous retrieval mechanism while allowing the source API to
-        // return a larger pool for filtering/deduplication.
-        if (normalized.length >= 15) {
-          break;
-        }
-      }
-
-      debugPrint(
-        "StungEvents returned ${normalized.length} usable events for $cityName.",
+      final query = _buildOpenAgendaEventQuery(
+        cityName: cityName,
+        latitude: latitude,
+        longitude: longitude,
+        destinationType: destinationType,
       );
 
-      return normalized;
+      // The cross-agenda endpoint searches published events across public,
+      // indexed agendas. OpenAgenda currently documents this v2 route as an
+      // experimental feature that may need to be enabled by their support team.
+      final crossAgendaUri = Uri.https(
+        'api.openagenda.com',
+        '/v2/events',
+        query,
+      );
+
+      debugPrint(
+        'OpenAgenda cross-agenda search for $cityName: $crossAgendaUri',
+      );
+
+      final crossAgendaResponse = await _requestOpenAgenda(
+        crossAgendaUri,
+        apiKey,
+        requestLabel: 'cross-agenda event search',
+      );
+
+      if (crossAgendaResponse != null) {
+        if (crossAgendaResponse.statusCode == 200) {
+          final rawEvents = _decodeOpenAgendaEvents(
+            crossAgendaResponse.body,
+          );
+
+          if (rawEvents != null && rawEvents.isNotEmpty) {
+            final normalized = _normalizeOpenAgendaEvents(
+              rawEvents,
+              cityName,
+              countryCode,
+              destinationType,
+            );
+
+            if (normalized.isNotEmpty) {
+              debugPrint(
+                'OpenAgenda returned ${normalized.length} usable events for $cityName.',
+              );
+              _logOpenAgendaCategoryDistribution(normalized, cityName);
+              return normalized;
+            }
+          }
+
+          debugPrint(
+            'OpenAgenda cross-agenda search returned no usable events for $cityName. Trying agenda discovery fallback.',
+          );
+        } else {
+          debugPrint(
+            'OpenAgenda cross-agenda HTTP ${crossAgendaResponse.statusCode}: '
+                '${crossAgendaResponse.body}',
+          );
+
+          // 401 usually means the key is invalid or lacks read permission.
+          // 429 means the caller is rate limited; do not amplify it with more calls.
+          if (crossAgendaResponse.statusCode == 401 ||
+              crossAgendaResponse.statusCode == 429) {
+            return [];
+          }
+        }
+      }
+
+      // Fallback for accounts that do not yet have experimental cross-agenda
+      // access: discover relevant public agendas, then read their event lists.
+      return await _fetchEventsThroughAgendaDiscovery(
+        cityName: cityName,
+        latitude: latitude,
+        longitude: longitude,
+        countryCode: countryCode,
+        destinationType: destinationType,
+        apiKey: apiKey,
+      );
     } catch (e) {
-      debugPrint(
-        "StungEvents event retrieval error: $e",
-      );
+      debugPrint('OpenAgenda event discovery error: $e');
       return [];
     }
   }
 
-  Map<String, dynamic>? _normalizeStungEvent(
-      Map raw,
+  Map<String, dynamic> _buildOpenAgendaEventQuery({
+    required String cityName,
+    required double latitude,
+    required double longitude,
+    required String destinationType,
+  }) {
+    final query = <String, dynamic>{
+      'relative[]': const ['current', 'upcoming'],
+      'size': '100',
+      'detailed': '1',
+      'includeLabels': '1',
+      'longDescriptionFormat': 'markdown',
+      'monolingual': 'en',
+      'sort': 'timings.asc',
+    };
+
+    if (destinationType == 'country') {
+      // The v2 cross-agenda documentation does not list a countryCode filter.
+      // Search the country name and validate returned country codes locally.
+      query['search'] = cityName.trim();
+      return query;
+    }
+
+    // OpenAgenda accepts a geographic bounding box for event discovery.
+    // Use a tighter box for city/neighborhood searches and a wider box for
+    // region-level destinations.
+    final normalizedType = destinationType.trim().toLowerCase();
+    final radiusKm = normalizedType == 'neighborhood'
+        ? 12.0
+        : (normalizedType == 'region' || normalizedType == 'district')
+        ? 90.0
+        : 30.0;
+
+    const kmPerLatitudeDegree = 111.32;
+    final latitudeRadians = latitude * (pi / 180.0);
+    final longitudeScale = cos(latitudeRadians).abs().clamp(0.15, 1.0);
+    final latitudeDelta = radiusKm / kmPerLatitudeDegree;
+    final longitudeDelta =
+        radiusKm / (kmPerLatitudeDegree * longitudeScale);
+
+    final north = (latitude + latitudeDelta).clamp(-90.0, 90.0);
+    final south = (latitude - latitudeDelta).clamp(-90.0, 90.0);
+    final east = (longitude + longitudeDelta).clamp(-180.0, 180.0);
+    final west = (longitude - longitudeDelta).clamp(-180.0, 180.0);
+
+    query['geo[northEast][lat]'] = north.toStringAsFixed(6);
+    query['geo[northEast][lng]'] = east.toStringAsFixed(6);
+    query['geo[southWest][lat]'] = south.toStringAsFixed(6);
+    query['geo[southWest][lng]'] = west.toStringAsFixed(6);
+
+    return query;
+  }
+
+  Future<http.Response?> _requestOpenAgenda(
+      Uri uri,
+      String apiKey, {
+        required String requestLabel,
+      }) async {
+    try {
+      return await http.get(
+        uri,
+        headers: {
+          'Accept': 'application/json',
+          // OpenAgenda v2 read authentication uses the account key header.
+          'key': apiKey,
+        },
+      ).timeout(_openAgendaRequestTimeout);
+    } catch (e) {
+      debugPrint('OpenAgenda $requestLabel request failed: $e');
+      return null;
+    }
+  }
+
+  List<Map<String, dynamic>>? _decodeOpenAgendaEvents(String body) {
+    try {
+      final decoded = json.decode(body);
+      if (decoded is! Map) {
+        debugPrint('OpenAgenda returned an unexpected response shape.');
+        return null;
+      }
+
+      final rawEvents = decoded['events'];
+      if (rawEvents is! List) {
+        debugPrint('OpenAgenda response did not contain an events array.');
+        return null;
+      }
+
+      return rawEvents
+          .whereType<Map>()
+          .map((event) => Map<String, dynamic>.from(event))
+          .toList();
+    } catch (e) {
+      debugPrint('OpenAgenda JSON parsing error: $e');
+      return null;
+    }
+  }
+
+  Future<List<Map<String, dynamic>>>
+  _fetchEventsThroughAgendaDiscovery({
+    required String cityName,
+    required double latitude,
+    required double longitude,
+    String? countryCode,
+    required String destinationType,
+    required String apiKey,
+  }) async {
+    final agendaSearchUri = Uri.https(
+      'api.openagenda.com',
+      '/v2/agendas',
+      <String, dynamic>{
+        'search': cityName.trim(),
+        'size': '30',
+      },
+    );
+
+    final agendaResponse = await _requestOpenAgenda(
+      agendaSearchUri,
+      apiKey,
+      requestLabel: 'agenda discovery fallback',
+    );
+
+    if (agendaResponse == null || agendaResponse.statusCode != 200) {
+      if (agendaResponse != null) {
+        debugPrint(
+          'OpenAgenda agenda discovery HTTP ${agendaResponse.statusCode}: '
+              '${agendaResponse.body}',
+        );
+      }
+      return [];
+    }
+
+    List<dynamic> rawAgendas;
+    try {
+      final decoded = json.decode(agendaResponse.body);
+      if (decoded is! Map || decoded['agendas'] is! List) {
+        debugPrint('OpenAgenda agenda search returned an unexpected response.');
+        return [];
+      }
+      rawAgendas = decoded['agendas'] as List<dynamic>;
+    } catch (e) {
+      debugPrint('OpenAgenda agenda search JSON parsing error: $e');
+      return [];
+    }
+
+    final agendaUids = <int>[];
+    for (final rawAgenda in rawAgendas) {
+      if (rawAgenda is! Map) continue;
+      final uid = int.tryParse(rawAgenda['uid']?.toString() ?? '');
+      if (uid != null && !agendaUids.contains(uid)) {
+        agendaUids.add(uid);
+      }
+      if (agendaUids.length >= _openAgendaAgendaFallbackLimit) break;
+    }
+
+    if (agendaUids.isEmpty) {
+      debugPrint('OpenAgenda did not find public agendas for $cityName.');
+      return [];
+    }
+
+    debugPrint(
+      'OpenAgenda fallback will inspect ${agendaUids.length} relevant agendas for $cityName.',
+    );
+
+    final allRawEvents = <Map<String, dynamic>>[];
+    final eventQuery = _buildOpenAgendaEventQuery(
+      cityName: cityName,
+      latitude: latitude,
+      longitude: longitude,
+      destinationType: destinationType,
+    );
+
+    // The agenda search has already narrowed the candidate agendas by country.
+    // Do not also apply a full-text country search to every event in each agenda;
+    // validate the event's location.countryCode after retrieval instead.
+    if (destinationType.trim().toLowerCase() == 'country') {
+      eventQuery.remove('search');
+    }
+
+    for (int start = 0;
+    start < agendaUids.length;
+    start += _openAgendaAgendaBatchSize) {
+      final end = (start + _openAgendaAgendaBatchSize < agendaUids.length)
+          ? start + _openAgendaAgendaBatchSize
+          : agendaUids.length;
+      final batch = agendaUids.sublist(start, end);
+
+      final batchResults = await Future.wait(
+        batch.map((agendaUid) async {
+          final uri = Uri.https(
+            'api.openagenda.com',
+            '/v2/agendas/$agendaUid/events',
+            eventQuery,
+          );
+
+          final response = await _requestOpenAgenda(
+            uri,
+            apiKey,
+            requestLabel: 'agenda $agendaUid event retrieval',
+          );
+
+          if (response == null || response.statusCode != 200) {
+            if (response != null) {
+              debugPrint(
+                'OpenAgenda agenda $agendaUid returned HTTP '
+                    '${response.statusCode}: ${response.body}',
+              );
+            }
+            return <Map<String, dynamic>>[];
+          }
+
+          final agendaEvents = _decodeOpenAgendaEvents(response.body) ??
+              <Map<String, dynamic>>[];
+
+          // Preserve the agenda context used for this request. OpenAgenda's
+          // event-detail route requires both agendaUID and eventUID.
+          return agendaEvents
+              .map((event) => <String, dynamic>{
+            ...event,
+            'agendaUID': agendaUid,
+          })
+              .toList();
+        }),
+      );
+
+      for (final events in batchResults) {
+        allRawEvents.addAll(events);
+      }
+    }
+
+    final normalized = _normalizeOpenAgendaEvents(
+      allRawEvents,
+      cityName,
+      countryCode,
+      destinationType,
+    );
+
+    debugPrint(
+      'OpenAgenda agenda-discovery fallback returned ${normalized.length} usable events for $cityName.',
+    );
+    _logOpenAgendaCategoryDistribution(normalized, cityName);
+
+    return normalized;
+  }
+
+  List<Map<String, dynamic>> _normalizeOpenAgendaEvents(
+      List<Map<String, dynamic>> rawEvents,
+      String cityName,
+      String? countryCode,
+      String destinationType,
+      ) {
+    final normalized = <Map<String, dynamic>>[];
+    final seenKeys = <String>{};
+    final expectedCountryCode = countryCode?.trim().toUpperCase();
+    final isCountry = destinationType.trim().toLowerCase() == 'country';
+
+    for (int index = 0; index < rawEvents.length; index++) {
+      final event = _normalizeOpenAgendaEvent(
+        rawEvents[index],
+        cityName,
+        index,
+      );
+
+      if (event == null) continue;
+
+      final eventCountryCode =
+          event['countryCode']?.toString().trim().toUpperCase() ?? '';
+      if (isCountry &&
+          expectedCountryCode != null &&
+          expectedCountryCode.isNotEmpty &&
+          eventCountryCode.isNotEmpty &&
+          eventCountryCode != expectedCountryCode) {
+        continue;
+      }
+
+      final id = event['id']?.toString().trim() ?? '';
+      final key = id.isNotEmpty
+          ? id
+          : '${event['name']?.toString().toLowerCase().trim()}|'
+          '${event['venue']?.toString().toLowerCase().trim()}|'
+          '${event['date']?.toString().trim()}';
+
+      if (!seenKeys.add(key)) continue;
+
+      normalized.add(event);
+
+      // Preserve the same practical event-card count used by the previous
+      // provider while still allowing duplicates to be removed first.
+      if (normalized.length >= 15) break;
+    }
+
+    return normalized;
+  }
+
+  Map<String, dynamic>? _normalizeOpenAgendaEvent(
+      Map<String, dynamic> raw,
       String cityName,
       int index,
       ) {
-    String readString(dynamic value) {
-      if (value == null) return '';
-      if (value is String) return value.trim();
-      return value.toString().trim();
-    }
+    final name = _openAgendaText(raw['title']);
+    if (name.isEmpty) return null;
 
-    String readNestedString(
-        dynamic value,
-        List<String> keys,
-        ) {
-      if (value is Map) {
-        for (final key in keys) {
-          final candidate = readString(value[key]);
-          if (candidate.isNotEmpty) {
-            return candidate;
-          }
-        }
-      }
-      return '';
-    }
+    final rawLocation = raw['location'];
+    final location = rawLocation is Map
+        ? Map<String, dynamic>.from(rawLocation)
+        : <String, dynamic>{};
 
-    final name = readString(
-      raw['title'] ?? raw['name'],
+    final venueName = _openAgendaText(location['name']);
+    final address = _openAgendaText(location['address']);
+    final venue = venueName.isNotEmpty ? venueName : address;
+
+    // Explore's current map/cards are venue-based. Keep the same rule as the
+    // previous integration and omit events without a mappable physical venue.
+    if (venue.isEmpty) return null;
+
+    final eventCity = _openAgendaText(
+      location['city'] ?? location['adminLevel4'],
+    );
+    final countryCode = _openAgendaText(location['countryCode']);
+    final country = _openAgendaText(location['country']).isNotEmpty
+        ? _openAgendaText(location['country'])
+        : countryCode;
+    final state = _openAgendaText(
+      location['region'] ?? location['adminLevel1'],
     );
 
-    if (name.isEmpty) {
-      return null;
-    }
+    // Keep `description` as the short listing summary for existing consumers.
+    // Carry `longDescription` separately for the event detail page.
+    final shortDescription = _openAgendaText(raw['description']);
+    final longDescription = _openAgendaText(raw['longDescription']);
+    final finalDescription = shortDescription.isNotEmpty
+        ? shortDescription
+        : longDescription.isNotEmpty
+        ? longDescription
+        : 'Upcoming event in ${eventCity.isNotEmpty ? eventCity : cityName}.';
 
-    final slug = readString(
-      raw['slug'] ?? raw['id'],
-    );
+    final agendaUID = _openAgendaAgendaUid(raw);
 
-    final startUtc = readString(
-      raw['start_utc'] ??
-          raw['start'] ??
-          raw['startDate'] ??
-          raw['date'],
-    );
+    // OpenAgenda v2 often exposes categories as agenda-specific additional
+    // fields instead of one universal `category` property.
+    final categoryMetadata = _collectOpenAgendaCategoryMetadata(raw);
 
-    final normalizedDate = _normalizeDate(startUtc);
-
-    final rawVenue = raw['venue'];
-
-    final venueName = readString(
-      raw['venue_name'] ??
-          (rawVenue is Map ? rawVenue['name'] : rawVenue),
-    );
-
-    if (venueName.isEmpty) {
-      return null;
-    }
-
-    final venueAddress = readString(
-      raw['venue_address'] ??
-          raw['address'] ??
-          raw['venueAddress'] ??
-          (rawVenue is Map
-              ? rawVenue['address'] ?? rawVenue['formatted_address']
-              : null),
-    );
-
-    final nestedVenueAddress = readNestedString(
-      rawVenue,
-      const [
-        'address',
-        'address_line',
-        'formatted_address',
-      ],
-    );
-
-    final address = venueAddress.isNotEmpty
-        ? venueAddress
-        : nestedVenueAddress;
-
-    final eventCity = readString(
-      raw['city'] ??
-          (rawVenue is Map ? rawVenue['city'] : null),
-    );
-
-    final country = readString(
-      raw['country'] ??
-          (rawVenue is Map ? rawVenue['country'] : null),
-    );
-
-    final categorySource = readString(
-      raw['category'] ??
-          raw['type'] ??
-          raw['genre'],
-    );
-
-    final category = _normalizeStungCategory(
+    final category = _normalizeOpenAgendaCategory(
       name: name,
-      category: categorySource,
+      description: finalDescription,
+      metadata: categoryMetadata,
     );
 
-    final description = readString(
-      raw['description'] ??
-          raw['summary'] ??
-          raw['info'] ??
-          raw['details'],
+    final categoryMetadataPreview = categoryMetadata.length > 160
+        ? '${categoryMetadata.substring(0, 160)}…'
+        : categoryMetadata;
+    debugPrint(
+      '🏷️ OpenAgenda category: "$name" → $category '
+          '| metadata: ${categoryMetadataPreview.isEmpty ? 'none' : categoryMetadataPreview}',
     );
 
-    final finalDescription = description.isNotEmpty
-        ? description
-        : 'Upcoming $category event in ${eventCity.isNotEmpty ? eventCity : cityName}.';
+    final startValue = _openAgendaEventStart(raw);
+    final normalizedDate = _normalizeDate(startValue);
 
-    final ticketUrl = readString(
-      raw['ticket_url'] ??
-          raw['ticketUrl'] ??
-          raw['url'] ??
-          raw['event_url'],
-    );
-
-    final imageUrl = _extractStungImageUrl(
-      raw,
-    );
-
-    final eventId = slug.isNotEmpty
+    final rawUid = _openAgendaText(raw['uid']);
+    final slug = _openAgendaText(raw['slug']);
+    final eventId = rawUid.isNotEmpty
+        ? rawUid
+        : slug.isNotEmpty
         ? slug
         : _stableEventId(
       '${name.toLowerCase()}|'
-          '${venueName.toLowerCase()}|'
+          '${venue.toLowerCase()}|'
           '${eventCity.toLowerCase()}|'
           '${normalizedDate ?? index}',
     );
 
+    final ticketUrl = _extractOpenAgendaRegistrationUrl(raw);
+    final imageUrl = _extractOpenAgendaImageUrl(raw['image']);
+    final effectiveCity = eventCity.isNotEmpty ? eventCity : cityName;
+
     return {
       'id': eventId,
+      'openAgendaEventUID': rawUid,
+      'agendaUID': agendaUID,
       'name': name,
       'description': finalDescription,
+      'shortDescription': shortDescription,
+      'longDescription': longDescription,
       'date': normalizedDate ?? 'TBA',
       'imageUrl': imageUrl ??
           'https://images.unsplash.com/photo-1459749411175-04bf5292ceea?auto=format&fit=crop&w=500&q=60',
-      'venue': venueName,
+      'venue': venue,
       'address': address,
-      'city': eventCity.isNotEmpty ? eventCity : cityName,
+      'city': effectiveCity,
       'country': country,
-      'state': '',
+      'countryCode': countryCode,
+      'state': state,
+      // Keep the existing Mapbox venue-geocoding mechanism in place.
       'latitude': 0.0,
       'longitude': 0.0,
       'ticketUrl': ticketUrl.isNotEmpty
           ? ticketUrl
-          : slug.isNotEmpty
-          ? 'https://api.stungevents.com/click/${Uri.encodeComponent(slug)}'
           : 'https://www.google.com/search?q='
-          '${Uri.encodeComponent('$name ${eventCity.isNotEmpty ? eventCity : cityName} tickets')}',
+          '${Uri.encodeComponent('$name $effectiveCity tickets')}',
       'categoryTag': category,
+      'source': 'OpenAgenda',
+      'rights': _openAgendaText(raw['rights']),
     };
   }
 
-  String? _extractStungImageUrl(
-      Map raw,
-      ) {
-    String? read(dynamic value) {
-      final text = value?.toString().trim();
-      return text != null && text.isNotEmpty ? text : null;
-    }
-
-    final direct = read(
-      raw['image_url'] ??
-          raw['imageUrl'] ??
-          raw['image'],
+  String _openAgendaAgendaUid(Map<String, dynamic> raw) {
+    final directUid = _openAgendaText(
+      raw['agendaUID'] ?? raw['agendaUid'] ?? raw['agenda_uid'],
     );
+    if (directUid.isNotEmpty) return directUid;
 
-    if (direct != null) {
-      return direct;
+    // Cross-agenda results can describe the agenda that originated or supplied
+    // the event. The fallback path sets agendaUID explicitly above.
+    for (final key in const ['sourceAgenda', 'originAgenda', 'agenda']) {
+      final candidate = raw[key];
+      if (candidate is Map) {
+        final uid = _openAgendaText(candidate['uid']);
+        if (uid.isNotEmpty) return uid;
+      }
     }
 
-    final images = raw['images'];
-    if (images is List) {
-      for (final image in images) {
-        if (image is Map) {
-          final candidate = read(
-            image['url'] ?? image['image_url'],
-          );
-          if (candidate != null) {
-            return candidate;
+    return '';
+  }
+
+  String _openAgendaText(dynamic value) {
+    if (value == null) return '';
+    if (value is String) return value.trim();
+    if (value is num || value is bool) return value.toString();
+
+    if (value is List) {
+      return value
+          .map(_openAgendaText)
+          .where((item) => item.isNotEmpty)
+          .join(', ');
+    }
+
+    if (value is Map) {
+      const preferredKeys = [
+        'en',
+        'en-GB',
+        'en-US',
+        'label',
+        'name',
+        'value',
+        'fr',
+      ];
+
+      for (final key in preferredKeys) {
+        if (value.containsKey(key)) {
+          final candidate = _openAgendaText(value[key]);
+          if (candidate.isNotEmpty) return candidate;
+        }
+      }
+
+      for (final entry in value.entries) {
+        final candidate = _openAgendaText(entry.value);
+        if (candidate.isNotEmpty) return candidate;
+      }
+    }
+
+    return '';
+  }
+
+  String _openAgendaEventStart(Map<String, dynamic> raw) {
+    final timings = raw['timings'];
+    if (timings is List) {
+      for (final timing in timings) {
+        if (timing is! Map) continue;
+        final begin = _openAgendaText(
+          timing['begin'] ?? timing['start'],
+        );
+        if (begin.isNotEmpty) return begin;
+      }
+    }
+
+    return _openAgendaText(
+      raw['begin'] ?? raw['startDate'] ?? raw['date'],
+    );
+  }
+
+  String _extractOpenAgendaRegistrationUrl(Map<String, dynamic> raw) {
+    final onlineAccessLink = _openAgendaText(raw['onlineAccessLink']);
+    if (onlineAccessLink.startsWith('http')) return onlineAccessLink;
+
+    final registration = raw['registration'];
+    if (registration is List) {
+      for (final item in registration) {
+        if (item is Map) {
+          final type = _openAgendaText(item['type']).toLowerCase();
+          final value = _openAgendaText(item['value']);
+          if ((type.isEmpty || type == 'link') &&
+              value.startsWith('http')) {
+            return value;
           }
         } else {
-          final candidate = read(image);
-          if (candidate != null) {
-            return candidate;
+          final value = _openAgendaText(item);
+          if (value.startsWith('http')) return value;
+        }
+      }
+    }
+
+    // Newer OpenAgenda event payloads may include structured ticket offers.
+    final offers = raw['offers'];
+    if (offers is List) {
+      for (final offer in offers) {
+        if (offer is! Map) continue;
+        final source = offer['source'];
+        if (source is Map) {
+          final url = _openAgendaText(source['url']);
+          if (url.startsWith('http')) return url;
+        }
+      }
+    }
+
+    final directUrl = _openAgendaText(
+      raw['url'] ?? raw['eventUrl'],
+    );
+    if (directUrl.startsWith('http')) return directUrl;
+
+    return '';
+  }
+
+  String? _extractOpenAgendaImageUrl(dynamic rawImage) {
+    if (rawImage is String) {
+      final direct = rawImage.trim();
+      return direct.startsWith('http') ? direct : null;
+    }
+
+    if (rawImage is! Map) return null;
+
+    final base = _openAgendaText(rawImage['base']);
+    final variants = rawImage['variants'];
+    String filename = '';
+
+    if (variants is List) {
+      // Prefer the smaller thumbnail for the Explore cards.
+      for (final variant in variants) {
+        if (variant is Map &&
+            _openAgendaText(variant['type']).toLowerCase() == 'thumbnail') {
+          filename = _openAgendaText(variant['filename']);
+          break;
+        }
+      }
+
+      if (filename.isEmpty) {
+        for (final variant in variants) {
+          if (variant is Map &&
+              _openAgendaText(variant['type']).toLowerCase() == 'base') {
+            filename = _openAgendaText(variant['filename']);
+            break;
           }
         }
       }
     }
 
-    return null;
+    if (filename.isEmpty) {
+      filename = _openAgendaText(rawImage['filename']);
+    }
+    if (filename.isEmpty) return null;
+    if (filename.startsWith('http')) return filename;
+    if (base.isEmpty) return null;
+
+    final normalizedBase = base.endsWith('/') ? base : '$base/';
+    return '$normalizedBase$filename';
   }
 
-  String _normalizeStungCategory({
-    required String name,
-    required String category,
-  }) {
-    final combined =
-    '$name $category'.toLowerCase().trim();
+  String _collectOpenAgendaCategoryMetadata(Map<String, dynamic> raw) {
+    final parts = <String>[];
 
-    if (combined.contains('festival') ||
-        combined.contains('carnival') ||
-        combined.contains('celebration')) {
+    const exactFieldNames = <String>{
+      'keyword', 'keywords',
+      'category', 'categories', 'eventcategory', 'eventcategories',
+      'type', 'types', 'eventtype', 'eventtypes',
+      'genre', 'genres', 'eventgenre',
+      'theme', 'themes', 'thematic', 'thematics', 'thematique', 'thematiques',
+      'subject', 'subjects', 'discipline', 'disciplines',
+      'tag', 'tags', 'taggroup', 'taggroups',
+      'activity', 'activities', 'activite', 'activites',
+      'typology', 'typologies', 'rubric', 'rubrique',
+      'format', 'formats', 'classification', 'classifications',
+      'domain', 'domains', 'univers', 'famille', 'nature',
+    };
+
+    for (final entry in raw.entries) {
+      final normalizedKey = _normalizeOpenAgendaCategoryText(entry.key)
+          .replaceAll(RegExp(r'[^a-z0-9]'), '');
+
+      final isKnownField = exactFieldNames.contains(normalizedKey);
+      final isCategoryLikeField =
+          normalizedKey.contains('categor') ||
+              normalizedKey.contains('themat') ||
+              normalizedKey.contains('genre') ||
+              normalizedKey.contains('keyword') ||
+              normalizedKey.contains('tag') ||
+              normalizedKey.contains('subject') ||
+              normalizedKey.contains('disciplin') ||
+              normalizedKey.contains('spectacle') ||
+              normalizedKey.contains('rubriq') ||
+              normalizedKey.contains('music') ||
+              normalizedKey.contains('musique') ||
+              normalizedKey.contains('sport') ||
+              normalizedKey.contains('festival') ||
+              normalizedKey.contains('theatre') ||
+              normalizedKey.contains('theater') ||
+              normalizedKey.contains('culture') ||
+              normalizedKey.contains('activit') ||
+              normalizedKey.contains('eventtype') ||
+              normalizedKey.contains('eventkind') ||
+              normalizedKey.contains('classification') ||
+              normalizedKey.contains('domain') ||
+              normalizedKey.contains('nature') ||
+              normalizedKey.contains('type');
+
+      if (!isKnownField && !isCategoryLikeField) continue;
+
+      final valueText = _flattenOpenAgendaClassificationValue(entry.value);
+      if (valueText.isNotEmpty) parts.add(valueText);
+
+      // A field named `genre` may contain a specific music genre (e.g. Rock,
+      // Jazz or Classical) rather than the literal word "Music".
+      if (normalizedKey.contains('genre') &&
+          RegExp(
+            r'\b(rock|pop|classical|jazz|hip hop|rap|electronic|metal|blues|folk|indie|reggae|soul|funk|house|techno|punk|disco|country|k pop|afrobeats|drum and bass)\b',
+            caseSensitive: false,
+          ).hasMatch(_normalizeOpenAgendaCategoryText(valueText))) {
+        parts.add('musicgenre');
+      }
+
+      // Some publishers encode the category directly in a custom field name.
+      // Include only field names that themselves contain a meaningful category.
+      if (normalizedKey.contains('music') ||
+          normalizedKey.contains('musique') ||
+          normalizedKey.contains('sport') ||
+          normalizedKey.contains('festival') ||
+          normalizedKey.contains('theatre') ||
+          normalizedKey.contains('theater') ||
+          normalizedKey.contains('concert')) {
+        parts.add(entry.key);
+      }
+    }
+
+    return parts.join(' ');
+  }
+
+  String _flattenOpenAgendaClassificationValue(dynamic value) {
+    if (value == null) return '';
+    if (value is String) return value.trim();
+    if (value is num || value is bool) return '';
+
+    if (value is List) {
+      return value
+          .map(_flattenOpenAgendaClassificationValue)
+          .where((part) => part.isNotEmpty)
+          .join(' ');
+    }
+
+    if (value is Map) {
+      const ignoredKeys = <String>{
+        'id', 'uid', 'code', 'slug', 'order', 'position',
+      };
+
+      return value.entries
+          .where((entry) =>
+      !ignoredKeys.contains(entry.key.toString().toLowerCase()))
+          .map((entry) => _flattenOpenAgendaClassificationValue(entry.value))
+          .where((part) => part.isNotEmpty)
+          .join(' ');
+    }
+
+    return '';
+  }
+
+  String _normalizeOpenAgendaCategoryText(String value) {
+    return value
+        .toLowerCase()
+        .replaceAll('á', 'a')
+        .replaceAll('à', 'a')
+        .replaceAll('â', 'a')
+        .replaceAll('ä', 'a')
+        .replaceAll('ã', 'a')
+        .replaceAll('å', 'a')
+        .replaceAll('ç', 'c')
+        .replaceAll('é', 'e')
+        .replaceAll('è', 'e')
+        .replaceAll('ê', 'e')
+        .replaceAll('ë', 'e')
+        .replaceAll('í', 'i')
+        .replaceAll('ì', 'i')
+        .replaceAll('î', 'i')
+        .replaceAll('ï', 'i')
+        .replaceAll('ñ', 'n')
+        .replaceAll('ó', 'o')
+        .replaceAll('ò', 'o')
+        .replaceAll('ô', 'o')
+        .replaceAll('ö', 'o')
+        .replaceAll('õ', 'o')
+        .replaceAll('ú', 'u')
+        .replaceAll('ù', 'u')
+        .replaceAll('û', 'u')
+        .replaceAll('ü', 'u')
+        .replaceAll('ý', 'y')
+        .replaceAll('ÿ', 'y')
+        .replaceAll('œ', 'oe')
+        .replaceAll('ß', 'ss')
+        .replaceAll('&', ' and ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+  }
+
+  String _normalizeOpenAgendaCategory({
+    required String name,
+    required String description,
+    required String metadata,
+  }) {
+    final titleText = _normalizeOpenAgendaCategoryText(name);
+    final descriptionText = _normalizeOpenAgendaCategoryText(description);
+    final metadataText = _normalizeOpenAgendaCategoryText(metadata);
+
+    const festivalPatterns = <String>[
+      r'\b(festival|festivals|carnival|carnivals|carnaval|carnavals|fete|fetes|fiesta|fiestas|celebration|celebrations|foire|foires|fair|fairs)\b',
+    ];
+
+    // A festival remains a festival even when it is music- or sports-themed.
+    // Only title and explicit metadata are decisive here; a casual mention in
+    // the description should not override a more specific event category.
+    if (_matchesOpenAgendaCategoryPatterns(titleText, festivalPatterns) ||
+        _matchesOpenAgendaCategoryPatterns(metadataText, festivalPatterns)) {
       return 'Festivals 🎪';
     }
 
-    if (combined.contains('sport') ||
-        combined.contains('football') ||
-        combined.contains('soccer') ||
-        combined.contains('basketball') ||
-        combined.contains('tennis') ||
-        combined.contains('baseball') ||
-        combined.contains('cricket') ||
-        combined.contains('racing') ||
-        combined.contains('marathon') ||
-        combined.contains('championship') ||
-        combined.contains('wrestling') ||
-        combined.contains('motorsport') ||
-        combined.contains('esport')) {
-      return 'Sports ⚽';
+    const sportsPatterns = <String>[
+      r'\b(sport|sports|football|soccer|rugby|basketball|tennis|baseball|cricket|volleyball|badminton|hockey|athletics|marathon|motorsport|motor racing|esports|e[- ]sports|championship|tournament|grand prix|formula 1|formula one|f1|boxing|golf|cycling|swimming|surfing|sailing|triathlon|wrestling|gymnastics|handball|rowing|canoe|kayak|skiing|snowboarding|skateboarding|equestrian|horse racing|ice hockey|table tennis|ping pong|martial arts|matchday)\b',
+      r'\b(race|racing|league match|match day|competition)\b',
+    ];
+
+    const concertPatterns = <String>[
+      r'\b(concert|concerts|gig|gigs|recital|recitals|orchestra|orchestral|symphony|symphonies|jazz|dj set|dj night|live music|music concert|music event|music night|music evening|music show|music showcase|music performance|band performance|live band|choir|choral|classical music|rock music|pop music|hip hop concert|rap concert|tournee)\b',
+    ];
+
+    const theaterPatterns = <String>[
+      r'\b(theatre|theater|theatrical|opera|operetta|broadway|west end|stand up|standup|comedy|comedian|improv|improvisation|ballet|performing arts|stage play|theatre play|theater play|dramatic arts|dance performance|musical|circus|cabaret|teatro|spectacle vivant)\b',
+    ];
+
+    final scores = <String, double>{
+      'Sports ⚽': 0.0,
+      'Concerts 🎸': 0.0,
+      'Theater 🎭': 0.0,
+    };
+
+    void addScore(
+        String category,
+        String text,
+        double weight,
+        List<String> patterns,
+        ) {
+      if (text.isEmpty) return;
+      final matches = _countOpenAgendaCategoryPatternMatches(text, patterns);
+      if (matches == 0) return;
+      scores[category] =
+          (scores[category] ?? 0) + (weight * (matches > 2 ? 2 : matches));
     }
 
-    if (combined.contains('music') ||
-        combined.contains('concert') ||
-        combined.contains('gig') ||
-        combined.contains('band') ||
-        combined.contains('live music')) {
-      return 'Concerts 🎸';
+    // Explicit agenda labels are strong evidence. The event title is also a
+    // strong signal, while descriptions are deliberately weaker because they
+    // may mention other kinds of events in passing.
+    addScore('Sports ⚽', metadataText, 7.0, sportsPatterns);
+    addScore('Sports ⚽', titleText, 6.5, sportsPatterns);
+    addScore('Sports ⚽', descriptionText, 1.4, sportsPatterns);
+
+    addScore('Concerts 🎸', metadataText, 7.0, concertPatterns);
+    addScore('Concerts 🎸', titleText, 6.5, concertPatterns);
+    addScore('Concerts 🎸', descriptionText, 1.4, concertPatterns);
+
+    addScore('Theater 🎭', metadataText, 7.0, theaterPatterns);
+    addScore('Theater 🎭', titleText, 6.5, theaterPatterns);
+    addScore('Theater 🎭', descriptionText, 1.4, theaterPatterns);
+
+    // OpenAgenda publishers commonly use a plain "Music/Musique" choice in a
+    // genre/category field rather than writing "concert" in the title.
+    if (RegExp(r'\b(music|musique|musica|musik|musicgenre)\b')
+        .hasMatch(metadataText)) {
+      scores['Concerts 🎸'] = (scores['Concerts 🎸'] ?? 0) + 7.0;
     }
 
-    if (combined.contains('theater') ||
-        combined.contains('theatre') ||
-        combined.contains('comedy') ||
-        combined.contains('performing') ||
-        combined.contains('opera') ||
-        combined.contains('musical') ||
-        combined.contains('broadway') ||
-        combined.contains('play') ||
-        combined.contains('arts & theatre') ||
-        combined.contains('arts and theatre') ||
-        combined.contains('film') ||
-        combined.contains('cinema')) {
-      return 'Theater 🎭';
+    // Dance, ballet and similar performing-arts categories are normally
+    // supplied as concise agenda labels rather than phrases in the event title.
+    if (RegExp(r'\b(dance|danse|danza)\b').hasMatch(metadataText)) {
+      scores['Theater 🎭'] = (scores['Theater 🎭'] ?? 0) + 7.0;
     }
 
-    return 'All';
+    final ranked = scores.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+
+    // A description-only passing reference should not classify an event.
+    if (ranked.isEmpty || ranked.first.value < 3.5) return 'All';
+    return ranked.first.key;
+  }
+
+  bool _matchesOpenAgendaCategoryPatterns(
+      String text,
+      List<String> patterns,
+      ) {
+    return patterns.any(
+          (pattern) => RegExp(pattern, caseSensitive: false).hasMatch(text),
+    );
+  }
+
+  int _countOpenAgendaCategoryPatternMatches(
+      String text,
+      List<String> patterns,
+      ) {
+    var count = 0;
+    for (final pattern in patterns) {
+      count += RegExp(pattern, caseSensitive: false).allMatches(text).length;
+    }
+    return count;
+  }
+
+  void _logOpenAgendaCategoryDistribution(
+      List<Map<String, dynamic>> events,
+      String cityName,
+      ) {
+    final counts = <String, int>{
+      'Concerts 🎸': 0,
+      'Sports ⚽': 0,
+      'Festivals 🎪': 0,
+      'Theater 🎭': 0,
+      'All': 0,
+    };
+
+    for (final event in events) {
+      final category = event['categoryTag']?.toString() ?? 'All';
+      counts[category] = (counts[category] ?? 0) + 1;
+    }
+
+    debugPrint(
+      '📊 OpenAgenda category breakdown for $cityName: '
+          'Concerts ${counts['Concerts 🎸']}, '
+          'Sports ${counts['Sports ⚽']}, '
+          'Festivals ${counts['Festivals 🎪']}, '
+          'Theater ${counts['Theater 🎭']}, '
+          'All ${counts['All']}.',
+    );
   }
 
   String? _normalizeDate(

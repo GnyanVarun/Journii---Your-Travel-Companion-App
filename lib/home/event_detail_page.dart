@@ -2,6 +2,7 @@ import 'dart:ui';
 import 'dart:convert';
 
 import 'package:http/http.dart' as http;
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -23,8 +24,8 @@ class _EventDetailPageState extends ConsumerState<EventDetailPage> {
   bool _isLoadingStatus = true;
   bool _isAddedToItinerary = false;
 
-  // Keeps the existing description as an immediate fallback while the
-  // complete StungEvents event record is retrieved.
+  // The full OpenAgenda long description is preferred. The short description
+  // from the event listing remains the fallback when no long text is published.
   String _description = '';
 
   bool _isTranslatingDescription = false;
@@ -35,18 +36,24 @@ class _EventDetailPageState extends ConsumerState<EventDetailPage> {
 
   int _translationRequestId = 0;
 
-  final ScrollController _descriptionScrollController = ScrollController();
-
-  @override
-  void dispose() {
-    _descriptionScrollController.dispose();
-    super.dispose();
-  }
-
   @override
   void initState() {
     super.initState();
-    _description = widget.event['description']?.toString() ?? '';
+    final longDescription = _readOpenAgendaText(
+      widget.event['longDescription'],
+    );
+    final shortDescription = _readOpenAgendaText(
+      widget.event['shortDescription'],
+    );
+    final fallbackDescription = _readOpenAgendaText(
+      widget.event['description'],
+    );
+    _description = longDescription.isNotEmpty
+        ? longDescription
+        : shortDescription.isNotEmpty
+        ? shortDescription
+        : fallbackDescription;
+
     _checkSavedStatus();
     _loadFullEventDescription();
     _translateEventContent(_description);
@@ -138,51 +145,100 @@ class _EventDetailPageState extends ConsumerState<EventDetailPage> {
     }
   }
 
-  // 🟢 Retrieves the complete event record from StungEvents so the
-  // ABOUT THIS EVENT section can display the full description.
+  // Retrieves the complete OpenAgenda event when the event-list response did
+  // not include longDescription. The v2 detail route requires both agendaUID
+  // and eventUID; both are preserved by ExploreTab.
   Future<void> _loadFullEventDescription() async {
-    final eventId = widget.event['id']?.toString().trim();
+    // Avoid an extra API request when the event-list response already includes
+    // the full description.
+    final existingLongDescription = _readOpenAgendaText(
+      widget.event['longDescription'],
+    );
+    if (existingLongDescription.isNotEmpty) return;
 
-    if (eventId == null || eventId.isEmpty) {
+    final agendaUID = _readOpenAgendaText(widget.event['agendaUID']);
+    final eventUID = _readOpenAgendaText(
+      widget.event['openAgendaEventUID'] ?? widget.event['id'],
+    );
+
+    if (agendaUID.isEmpty || eventUID.isEmpty) {
+      debugPrint(
+        'OpenAgenda detail lookup skipped: agendaUID or eventUID is missing.',
+      );
       return;
     }
 
-    final uri = Uri.parse(
-      'https://api.stungevents.com/events/${Uri.encodeComponent(eventId)}',
+    final apiKey = dotenv.env['OPENAGENDA_API_KEY']?.trim() ?? '';
+    if (apiKey.isEmpty) {
+      debugPrint(
+        'OpenAgenda detail lookup skipped: OPENAGENDA_API_KEY is missing.',
+      );
+      return;
+    }
+
+    // A secret key must never be embedded in a Flutter application.
+    if (apiKey.startsWith('oa_sk_')) {
+      debugPrint(
+        'OpenAgenda secret key detected. Use a public oa_pk_ read key in Flutter.',
+      );
+      return;
+    }
+
+    final uri = Uri.https(
+      'api.openagenda.com',
+      '/v2/agendas/${Uri.encodeComponent(agendaUID)}/events/${Uri.encodeComponent(eventUID)}',
+      const {
+        'longDescriptionFormat': 'markdown',
+      },
     );
 
     try {
       final response = await http
           .get(
         uri,
-        headers: const {
+        headers: {
           'Accept': 'application/json',
+          'key': apiKey,
         },
       )
-          .timeout(const Duration(seconds: 10));
+          .timeout(const Duration(seconds: 15));
 
       if (response.statusCode != 200) {
         debugPrint(
-          "StungEvents detail error ${response.statusCode}: ${response.body}",
+          'OpenAgenda event detail HTTP ${response.statusCode}: ${response.body}',
         );
         return;
       }
 
       final decoded = json.decode(response.body);
-
       if (decoded is! Map) {
+        debugPrint('OpenAgenda event detail returned an unexpected response.');
         return;
       }
 
-      final rawEvent = decoded['event'];
-
-      if (rawEvent is! Map) {
-        return;
+      Map<String, dynamic>? rawEvent;
+      final eventPayload = decoded['event'];
+      if (eventPayload is Map) {
+        rawEvent = Map<String, dynamic>.from(eventPayload);
+      } else if (decoded['data'] is Map) {
+        final dataPayload = decoded['data'] as Map;
+        final nestedEvent = dataPayload['event'];
+        rawEvent = nestedEvent is Map
+            ? Map<String, dynamic>.from(nestedEvent)
+            : Map<String, dynamic>.from(dataPayload);
+      } else {
+        rawEvent = Map<String, dynamic>.from(decoded);
       }
 
-      final fullDescription = rawEvent['description']?.toString().trim() ?? '';
+      final eventData = rawEvent ?? <String, dynamic>{};
+      final fullDescription = _readOpenAgendaText(
+        eventData['longDescription'],
+      );
 
       if (fullDescription.isEmpty || !mounted) {
+        debugPrint(
+          'OpenAgenda event $eventUID has no published longDescription; keeping the short description.',
+        );
         return;
       }
 
@@ -190,12 +246,88 @@ class _EventDetailPageState extends ConsumerState<EventDetailPage> {
         _description = fullDescription;
       });
 
-      // Re-run translation against the complete StungEvents description so
-      // the translated text always corresponds to the latest source text.
+      // Re-run the existing translation mechanism against the full text.
       _translateEventContent(fullDescription);
+      debugPrint(
+        'OpenAgenda full description loaded for event $eventUID '
+            '(${fullDescription.length} characters).',
+      );
     } catch (e) {
-      debugPrint("StungEvents detail retrieval error: $e");
+      debugPrint('OpenAgenda event detail retrieval error: $e');
     }
+  }
+
+  String _readOpenAgendaText(dynamic value) {
+    if (value == null) return '';
+    if (value is String) return value.trim();
+    if (value is num || value is bool) return value.toString();
+
+    if (value is List) {
+      return value
+          .map(_readOpenAgendaText)
+          .where((item) => item.isNotEmpty)
+          .join('\n');
+    }
+
+    if (value is Map) {
+      const preferredKeys = [
+        'en',
+        'en-GB',
+        'en-US',
+        'fr',
+        'label',
+        'name',
+        'value',
+      ];
+      for (final key in preferredKeys) {
+        if (value.containsKey(key)) {
+          final candidate = _readOpenAgendaText(value[key]);
+          if (candidate.isNotEmpty) return candidate;
+        }
+      }
+      for (final entry in value.entries) {
+        final candidate = _readOpenAgendaText(entry.value);
+        if (candidate.isNotEmpty) return candidate;
+      }
+    }
+
+    return '';
+  }
+
+  // OpenAgenda longDescription is Markdown. Keep paragraphs and list structure
+  // readable without adding a new package dependency to the existing app.
+  String _formatOpenAgendaDescription(String input) {
+    var value = input.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
+
+    value = value
+        .replaceAll(RegExp(r'<br\s*/?>', caseSensitive: false), '\n')
+        .replaceAll(RegExp(r'</p\s*>', caseSensitive: false), '\n\n')
+        .replaceAll(RegExp(r'<p[^>]*>', caseSensitive: false), '')
+        .replaceAll(RegExp(r'<[^>]+>'), '');
+
+    value = value.replaceAllMapped(
+      RegExp(r'!\[([^\]]*)\]\([^)]+\)'),
+          (match) => match.group(1) ?? '',
+    );
+    value = value.replaceAllMapped(
+      RegExp(r'\[([^\]]+)\]\((https?://[^)]+)\)'),
+          (match) => '${match.group(1)} (${match.group(2)})',
+    );
+
+    final lines = value.split('\n').map((line) {
+      var cleaned = line.trimRight();
+      cleaned = cleaned.replaceFirst(RegExp(r'^\s{0,3}#{1,6}\s*'), '');
+      cleaned = cleaned.replaceFirst(RegExp(r'^\s*>\s?'), '');
+      cleaned = cleaned.replaceFirst(
+        RegExp(r'^\s*[-*+]\s+'),
+        '• ',
+      );
+      cleaned = cleaned.replaceAll('**', '').replaceAll('__', '');
+      cleaned = cleaned.replaceAll('~~', '').replaceAll('`', '');
+      return cleaned;
+    }).toList();
+
+    return lines.join('\n').replaceAll(RegExp(r'\n{3,}'), '\n\n').trim();
   }
 
   // 🟢 DYNAMIC GRADIENT ENGINE (Matches the Explore Tab)
@@ -315,6 +447,8 @@ class _EventDetailPageState extends ConsumerState<EventDetailPage> {
     hasTranslation && !_showOriginalDescription
         ? _translatedDescription!
         : description;
+    final formattedDisplayDescription =
+    _formatOpenAgendaDescription(displayDescription);
 
     return Scaffold(
       backgroundColor: bgColor,
@@ -521,26 +655,13 @@ class _EventDetailPageState extends ConsumerState<EventDetailPage> {
                         ),
                       if (hasTranslation || _isTranslatingDescription)
                         const SizedBox(height: 8),
-                      ConstrainedBox(
-                        constraints: BoxConstraints(
-                          maxHeight: MediaQuery.of(context).size.height * 0.30,
-                        ),
-                        child: Scrollbar(
-                          controller: _descriptionScrollController,
-                          thumbVisibility: true,
-                          child: SingleChildScrollView(
-                            controller: _descriptionScrollController,
-                            physics: const BouncingScrollPhysics(),
-                            child: Text(
-                              displayDescription,
-                              style: TextStyle(
-                                color: textColor.withOpacity(0.85),
-                                fontSize: 16,
-                                height: 1.7,
-                                fontWeight: FontWeight.w500,
-                              ),
-                            ),
-                          ),
+                      Text(
+                        formattedDisplayDescription,
+                        style: TextStyle(
+                          color: textColor.withOpacity(0.85),
+                          fontSize: 16,
+                          height: 1.7,
+                          fontWeight: FontWeight.w500,
                         ),
                       ),
                     ],
