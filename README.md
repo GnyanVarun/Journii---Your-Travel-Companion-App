@@ -72,7 +72,7 @@ Discover:
 
 Data Sources Include:
 <ul>
-  <li>PredictHQ</li>
+  <li>OpenAgenda</li>
 </ul>
 
 ### 📍 Intelligent Place Exploration
@@ -142,10 +142,10 @@ Flutter
 | State Management | Riverpod |
 | Backend | Supabase |
 | Database | PostgreSQL |
-| AI | Google Gemini |
+| AI | Google Gemini, NVIDIA Nemotron |
 | Maps | Mapbox, Open Street Map |
 | Storage | Hive, Supabase with Edge Functions |
-| APIs | Google generative AI, Amadeus, Yelp, Transitland, PredictHQ |
+| APIs | Google generative AI, Amadeus, Yelp, Transitland, PredictHQ, NVIDIA Nemotron |
 
 ---
 
